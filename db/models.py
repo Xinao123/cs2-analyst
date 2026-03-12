@@ -186,6 +186,14 @@ class Database:
             row = conn.execute("SELECT * FROM teams WHERE id=?", (team_id,)).fetchone()
             return dict(row) if row else None
 
+    def get_team_by_name(self, name: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM teams WHERE lower(name)=lower(?) LIMIT 1",
+                (name.strip(),),
+            ).fetchone()
+            return dict(row) if row else None
+
     def get_all_teams(self) -> list[dict]:
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM teams ORDER BY ranking ASC").fetchall()
