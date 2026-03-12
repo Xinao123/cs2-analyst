@@ -11,6 +11,8 @@ import re
 import zlib
 from datetime import datetime
 
+import requests
+
 from db.models import Database
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,15 @@ class HLTVScraper:
         self.upcoming_days = max(1, _safe_int(scraper_cfg.get("upcoming_days", 2)))
         self.results_days = max(1, _safe_int(scraper_cfg.get("results_days", 2)))
         self.results_max = max(30, _safe_int(scraper_cfg.get("results_max", 200)))
+        self.user_agent = scraper_cfg.get(
+            "user_agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        )
+        self.referer = scraper_cfg.get("referer", "https://www.hltv.org/stats")
+        self.hltv_timezone = scraper_cfg.get("hltv_timezone", "Europe/Copenhagen")
+        self.cookie = scraper_cfg.get("cookie", "")
+        extra_headers = scraper_cfg.get("extra_headers", {})
+        self.extra_headers = extra_headers if isinstance(extra_headers, dict) else {}
         self._hltv = None
 
     async def _get_client(self):
@@ -45,6 +56,18 @@ class HLTVScraper:
                 kwargs["proxy_path"] = self.proxy_path
 
             self._hltv = Hltv(**kwargs)
+            # Permite customizar headers para reduzir bloqueio por Cloudflare.
+            self._hltv.headers.update(
+                {
+                    "user-agent": self.user_agent,
+                    "referer": self.referer,
+                    "hltvTimeZone": self.hltv_timezone,
+                }
+            )
+            if self.cookie:
+                self._hltv.headers["cookie"] = self.cookie
+            if self.extra_headers:
+                self._hltv.headers.update({str(k): str(v) for k, v in self.extra_headers.items()})
         return self._hltv
 
     async def close(self):
@@ -168,6 +191,14 @@ class HLTVScraper:
                 return 0
             if not matches:
                 logger.warning("[HLTV] API retornou 0 partidas futuras")
+                cf_diag = self._diagnose_cloudflare_on_matches()
+                if cf_diag["blocked"]:
+                    logger.warning(
+                        "[HLTV] Possivel bloqueio Cloudflare em /matches "
+                        "(status=%s, challenge=%s). Configure proxy_path e/ou scraper.cookie (cf_clearance).",
+                        cf_diag["status"],
+                        cf_diag["challenge"],
+                    )
                 return 0
 
             total = len(matches)
@@ -468,6 +499,30 @@ class HLTVScraper:
 
         logger.info("[HLTV] Fallback por eventos encontrou %s partidas", len(out))
         return out
+
+    def _diagnose_cloudflare_on_matches(self) -> dict:
+        headers = {
+            "user-agent": self.user_agent,
+            "referer": self.referer,
+            "hltvTimeZone": self.hltv_timezone,
+        }
+        if self.cookie:
+            headers["cookie"] = self.cookie
+        if self.extra_headers:
+            headers.update({str(k): str(v) for k, v in self.extra_headers.items()})
+
+        try:
+            resp = requests.get("https://www.hltv.org/matches", headers=headers, timeout=20)
+            body = resp.text.lower()
+            challenge = (
+                ("just a moment" in body)
+                or ("enable javascript and cookies" in body)
+                or ("challenge-error-title" in body)
+            )
+            blocked = resp.status_code in (403, 429) or challenge
+            return {"blocked": blocked, "status": resp.status_code, "challenge": challenge}
+        except Exception:
+            return {"blocked": False, "status": "error", "challenge": False}
 
     def _resolve_team_id(self, team_id: int, team_name: str) -> int:
         if team_id > 0:
