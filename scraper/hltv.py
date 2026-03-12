@@ -25,6 +25,10 @@ class HLTVScraper:
         self.min_delay = scraper_cfg.get("min_delay", 4.0)
         self.max_delay = scraper_cfg.get("max_delay", 10.0)
         self.proxy_path = scraper_cfg.get("proxy_path", "")
+        self.min_rating = _safe_int(scraper_cfg.get("min_rating", 0))
+        self.upcoming_days = max(1, _safe_int(scraper_cfg.get("upcoming_days", 2)))
+        self.results_days = max(1, _safe_int(scraper_cfg.get("results_days", 2)))
+        self.results_max = max(30, _safe_int(scraper_cfg.get("results_max", 200)))
         self._hltv = None
 
     async def _get_client(self):
@@ -138,7 +142,19 @@ class HLTVScraper:
 
         try:
             # Compatibilidade com hltv-async-api 0.8.x.
-            matches = await hltv.get_matches(days=1, live=False, future=True)
+            matches = await hltv.get_matches(
+                days=self.upcoming_days,
+                min_rating=self.min_rating,
+                live=False,
+                future=True,
+            )
+            if not matches:
+                logger.info(
+                    "[HLTV] Retorno vazio para upcoming (days=%s, min_rating=%s), tentando modo amplo...",
+                    self.upcoming_days,
+                    self.min_rating,
+                )
+                matches = await hltv.get_matches(days=7, min_rating=0, live=False, future=True)
             if matches is None:
                 logger.warning("[HLTV] API retornou None para partidas futuras")
                 return 0
@@ -225,7 +241,27 @@ class HLTVScraper:
         hltv = await self._get_client()
 
         try:
-            results = await hltv.get_results(days=max(1, pages))
+            results = await hltv.get_results(
+                days=max(self.results_days, pages + 1),
+                min_rating=self.min_rating,
+                max=self.results_max,
+                featured=True,
+                regular=True,
+            )
+            if not results:
+                logger.info(
+                    "[HLTV] Retorno vazio para resultados (days=%s, min_rating=%s, max=%s), tentando modo amplo...",
+                    max(self.results_days, pages + 1),
+                    self.min_rating,
+                    self.results_max,
+                )
+                results = await hltv.get_results(
+                    days=7,
+                    min_rating=0,
+                    max=300,
+                    featured=True,
+                    regular=True,
+                )
             if results is None:
                 logger.warning("[HLTV] API retornou None para resultados")
                 return 0
