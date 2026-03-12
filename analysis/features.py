@@ -1,10 +1,10 @@
-"""
-Feature Engineering — Extrai features numéricas para o modelo.
+﻿"""
+Feature Engineering â€” Extrai features numÃ©ricas para o modelo.
 
-Cada partida é transformada em um vetor de features que captura:
-- Diferença de skill entre os times
+Cada partida Ã© transformada em um vetor de features que captura:
+- DiferenÃ§a de skill entre os times
 - Forma recente
-- Histórico head-to-head
+- HistÃ³rico head-to-head
 - Contexto (BO1/BO3, LAN/online, tier do evento)
 """
 
@@ -26,16 +26,20 @@ class FeatureExtractor:
         model_cfg = config.get("model", {})
         self.min_matches = model_cfg.get("min_matches", 10)
         self.form_window = model_cfg.get("form_window_days", 90)
+        # Inferencia ao vivo segue conservadora; treino pode ser permissivo.
+        self.live_min_recent_matches = model_cfg.get("live_min_recent_matches", 3)
+        self.train_min_recent_matches = model_cfg.get("train_min_recent_matches", 0)
 
-    def extract(self, match: dict) -> dict | None:
+    def extract(self, match: dict, min_recent_matches: int | None = None) -> dict | None:
         """
         Extrai features de uma partida.
 
         Args:
             match: dict com team1_id, team2_id, best_of, event_tier, is_lan
+            min_recent_matches: minimo de jogos recentes por time exigido
 
         Returns:
-            dict de features numéricas ou None se dados insuficientes
+            dict de features numÃ©ricas ou None se dados insuficientes
         """
         t1_id = match["team1_id"]
         t2_id = match["team2_id"]
@@ -49,7 +53,12 @@ class FeatureExtractor:
         t1_recent = self.db.get_team_recent_matches(t1_id, limit=20, days=self.form_window)
         t2_recent = self.db.get_team_recent_matches(t2_id, limit=20, days=self.form_window)
 
-        if len(t1_recent) < 3 or len(t2_recent) < 3:
+        required = (
+            self.live_min_recent_matches
+            if min_recent_matches is None
+            else max(0, int(min_recent_matches))
+        )
+        if len(t1_recent) < required or len(t2_recent) < required:
             logger.debug(f"Dados insuficientes: {t1['name']} ({len(t1_recent)}) vs {t2['name']} ({len(t2_recent)})")
             return None
 
@@ -75,7 +84,7 @@ class FeatureExtractor:
         features["team1_winrate"] = wr1
         features["team2_winrate"] = wr2
 
-        # ---- Forma recente (últimos 5 jogos) ----
+        # ---- Forma recente (Ãºltimos 5 jogos) ----
         form1 = _calc_win_rate(t1_recent[:5], t1_id)
         form2 = _calc_win_rate(t2_recent[:5], t2_id)
         features["form_diff"] = form1 - form2
@@ -93,7 +102,7 @@ class FeatureExtractor:
         features["h2h_matches"] = len(h2h)
         features["h2h_advantage"] = h2h_wr1 - 0.5 if h2h else 0.0
 
-        # ---- Player stats (média do time) ----
+        # ---- Player stats (mÃ©dia do time) ----
         t1_avg_rating = _avg_stat(t1_players, "rating")
         t2_avg_rating = _avg_stat(t2_players, "rating")
         features["avg_rating_diff"] = t1_avg_rating - t2_avg_rating
@@ -108,7 +117,7 @@ class FeatureExtractor:
         t2_avg_impact = _avg_stat(t2_players, "impact")
         features["avg_impact_diff"] = t1_avg_impact - t2_avg_impact
 
-        # ---- Map pool (diversidade e força) ----
+        # ---- Map pool (diversidade e forÃ§a) ----
         t1_strong_maps = sum(1 for m in t1_maps.values() if m.get("win_rate", 0) > 55)
         t2_strong_maps = sum(1 for m in t2_maps.values() if m.get("win_rate", 0) > 55)
         features["strong_maps_diff"] = t1_strong_maps - t2_strong_maps
@@ -147,18 +156,23 @@ class FeatureExtractor:
 
         features_list = []
         labels = []
+        skipped = 0
 
         for row in rows:
             match = dict(row)
-            feats = self.extract(match)
+            feats = self.extract(match, min_recent_matches=self.train_min_recent_matches)
             if feats is None:
+                skipped += 1
                 continue
 
             label = 1 if match["winner_id"] == match["team1_id"] else 0
             features_list.append(feats)
             labels.append(label)
 
-        logger.info(f"[FEATURES] {len(features_list)} amostras extraídas de {len(rows)} partidas")
+        logger.info(
+            f"[FEATURES] {len(features_list)} amostras extraidas de {len(rows)} partidas "
+            f"(descartadas: {skipped}, min_recent_train={self.train_min_recent_matches})"
+        )
         return features_list, labels
 
 
@@ -174,7 +188,7 @@ def _calc_win_rate(matches: list[dict], team_id: int) -> float:
 
 
 def _calc_streak(matches: list[dict], team_id: int) -> int:
-    """Calcula streak atual (positivo = vitórias, negativo = derrotas)."""
+    """Calcula streak atual (positivo = vitÃ³rias, negativo = derrotas)."""
     streak = 0
     for m in matches:
         won = m.get("winner_id") == team_id
@@ -199,3 +213,4 @@ def _calc_h2h_winrate(h2h_matches: list[dict], team_id: int) -> float:
 def _avg_stat(players: list[dict], stat: str) -> float:
     vals = [p.get(stat, 0) for p in players if p.get(stat, 0) > 0]
     return np.mean(vals) if vals else 0.0
+
