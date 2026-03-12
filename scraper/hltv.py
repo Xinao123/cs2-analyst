@@ -90,6 +90,10 @@ class HLTVScraper:
 
     async def scrape_team_info(self, team_id: int, team_name: str):
         """Busca informacoes detalhadas de um time."""
+        if team_id <= 0:
+            logger.debug("[HLTV] Ignorando team_info para id sintetico: %s (%s)", team_id, team_name)
+            return
+
         hltv = await self._get_client()
 
         try:
@@ -482,8 +486,7 @@ class HLTVScraper:
             return relaxed_id
 
         synthetic_id = _synthetic_team_id(name)
-        if not self.db.get_team(synthetic_id):
-            self.db.upsert_team(synthetic_id, name)
+        self.db.upsert_team(synthetic_id, name, ranking=9999)
         return synthetic_id
 
     def _lookup_team_by_name_relaxed(self, team_name: str) -> int:
@@ -512,7 +515,7 @@ class HLTVScraper:
 
         await self.scrape_upcoming_matches()
 
-        teams = self.db.get_all_teams()[:20]
+        teams = [t for t in self.db.get_all_teams() if _safe_int(t.get("id")) > 0][:20]
         for team in teams:
             await self.scrape_team_info(team["id"], team["name"])
             await asyncio.sleep(1)
