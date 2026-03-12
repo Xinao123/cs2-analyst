@@ -1,0 +1,49 @@
+# ============================================================
+# CS2 ANALYST BOT — Configuração
+# ============================================================
+
+# Telegram
+telegram:
+  enabled: true
+  bot_token: "8340705505:AAEAyTertkpSQMqFATWwG4vzY_DEKQ5QCS8"
+  chat_id: "5496924490"
+
+# Scraper
+scraper:
+  # Delay entre requests ao HLTV (respeitar rate limit)
+  min_delay: 4.0
+  max_delay: 10.0
+  # Proxy (opcional — recomendado se for scrape pesado)
+  proxy_path: ""  # ex: "proxies.txt"
+  # Quantos meses de histórico buscar no backfill inicial
+  backfill_months: 6
+
+# Banco de dados
+database:
+  path: "data/cs2_analyst.db"
+
+# Modelo
+model:
+  # Caminho onde salvar/carregar o modelo treinado
+  path: "data/model.joblib"
+  # Mínimo de partidas do time pra considerar nas features
+  min_matches: 10
+  # Janela de forma recente (dias)
+  form_window_days: 90
+  # Mínimo de value (%) pra disparar alerta
+  min_value_pct: 4.0
+  # Confiança mínima do modelo (%) pra considerar
+  min_confidence: 55.0
+
+# Gestão de banca
+bankroll:
+  total: 2000.0          # Banca total (R$)
+  max_bet_pct: 3.0        # Máximo % da banca por aposta
+  kelly_fraction: 0.25    # Fração de Kelly (0.25 = quarter Kelly, conservador)
+
+# Scheduler
+scheduler:
+  # Intervalo entre scans de partidas futuras (minutos)
+  scan_interval: 60
+  # Hora do scrape diário de stats (formato 24h)
+  daily_update_hour: 6

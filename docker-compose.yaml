@@ -1,0 +1,9 @@
+services:
+  cs2-analyst:
+    build: .
+    container_name: cs2-analyst
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    environment:
+      - TZ=America/Sao_Paulo
