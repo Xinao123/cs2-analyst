@@ -8,6 +8,7 @@ Respeita rate limits do HLTV com delays configuraveis.
 import asyncio
 import logging
 import re
+import zlib
 from datetime import datetime
 
 from db.models import Database
@@ -155,6 +156,9 @@ class HLTVScraper:
                     self.min_rating,
                 )
                 matches = await hltv.get_matches(days=7, min_rating=0, live=False, future=True)
+            if not matches:
+                logger.info("[HLTV] Upcoming ainda vazio, tentando fallback por eventos...")
+                matches = await self._collect_upcoming_from_events(hltv)
             if matches is None:
                 logger.warning("[HLTV] API retornou None para partidas futuras")
                 return 0
@@ -178,14 +182,8 @@ class HLTVScraper:
                     team1_name = normalized["team1_name"]
                     team2_name = normalized["team2_name"]
 
-                    if team1_id == 0 and team1_name:
-                        team = self.db.get_team_by_name(team1_name)
-                        if team:
-                            team1_id = int(team["id"])
-                    if team2_id == 0 and team2_name:
-                        team = self.db.get_team_by_name(team2_name)
-                        if team:
-                            team2_id = int(team["id"])
+                    team1_id = self._resolve_team_id(team1_id, team1_name)
+                    team2_id = self._resolve_team_id(team2_id, team2_name)
 
                     if team1_id == 0 or team2_id == 0:
                         skips["sem_id"] += 1
@@ -285,14 +283,8 @@ class HLTVScraper:
                     team1_name = normalized["team1_name"]
                     team2_name = normalized["team2_name"]
 
-                    if team1_id == 0 and team1_name:
-                        team = self.db.get_team_by_name(team1_name)
-                        if team:
-                            team1_id = int(team["id"])
-                    if team2_id == 0 and team2_name:
-                        team = self.db.get_team_by_name(team2_name)
-                        if team:
-                            team2_id = int(team["id"])
+                    team1_id = self._resolve_team_id(team1_id, team1_name)
+                    team2_id = self._resolve_team_id(team2_id, team2_name)
 
                     if team1_id == 0 or team2_id == 0:
                         skips["sem_id"] += 1
@@ -436,6 +428,74 @@ class HLTVScraper:
             "team2_score": team2_score,
         }
 
+    async def _collect_upcoming_from_events(self, hltv) -> list[dict]:
+        """Fallback quando get_matches() retorna vazio: agrega jogos por evento."""
+        out: list[dict] = []
+        try:
+            events = await hltv.get_events(outgoing=True, future=True, max_events=12)
+        except Exception as e:
+            logger.debug(f"[HLTV] Fallback eventos falhou ao listar eventos: {e}")
+            return out
+
+        if not events:
+            return out
+
+        seen_ids: set[int] = set()
+        for event in events:
+            event_id = _safe_int(event.get("id"))
+            if event_id <= 0:
+                continue
+            event_title = _safe_str(event.get("title"))
+            try:
+                event_matches = await hltv.get_event_matches(event_id, days=max(2, self.upcoming_days))
+            except Exception as e:
+                logger.debug(f"[HLTV] Falha ao buscar partidas do evento {event_id}: {e}")
+                continue
+
+            for match in event_matches or []:
+                match_id = _safe_int(match.get("id"))
+                if match_id <= 0 or match_id in seen_ids:
+                    continue
+                seen_ids.add(match_id)
+                if not match.get("event") and event_title:
+                    match = dict(match)
+                    match["event"] = event_title
+                out.append(match)
+
+        logger.info("[HLTV] Fallback por eventos encontrou %s partidas", len(out))
+        return out
+
+    def _resolve_team_id(self, team_id: int, team_name: str) -> int:
+        if team_id > 0:
+            return team_id
+
+        name = _safe_str(team_name)
+        if not name:
+            return 0
+
+        team = self.db.get_team_by_name(name)
+        if team:
+            return int(team["id"])
+
+        relaxed_id = self._lookup_team_by_name_relaxed(name)
+        if relaxed_id:
+            return relaxed_id
+
+        synthetic_id = _synthetic_team_id(name)
+        if not self.db.get_team(synthetic_id):
+            self.db.upsert_team(synthetic_id, name)
+        return synthetic_id
+
+    def _lookup_team_by_name_relaxed(self, team_name: str) -> int:
+        target = _normalize_team_name(team_name)
+        if not target:
+            return 0
+
+        for team in self.db.get_all_teams():
+            if _normalize_team_name(team.get("name", "")) == target:
+                return _safe_int(team.get("id"))
+        return 0
+
     # ============================================================
     # Full update
     # ============================================================
@@ -526,6 +586,19 @@ def _extract_team(team_data) -> dict:
         return {"id": 0, "name": team_data.strip()}
 
     return {"id": 0, "name": ""}
+
+
+def _normalize_team_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", _safe_str(name).lower())
+
+
+def _synthetic_team_id(team_name: str) -> int:
+    """Gera id negativo estavel para times sem id no payload do HLTV."""
+    norm = _normalize_team_name(team_name)
+    if not norm:
+        return 0
+    # Mantem no range int32 e evita conflito com ids reais (positivos).
+    return -((zlib.crc32(norm.encode("utf-8")) % 2_000_000_000) + 1)
 
 
 def _parse_best_of(val) -> int:
