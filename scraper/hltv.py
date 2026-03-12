@@ -10,6 +10,7 @@ import logging
 import re
 import zlib
 from datetime import datetime
+from pathlib import Path
 
 import requests
 
@@ -52,8 +53,9 @@ class HLTVScraper:
                 "min_delay": self.min_delay,
                 "max_delay": self.max_delay,
             }
-            if self.proxy_path:
-                kwargs["proxy_path"] = self.proxy_path
+            resolved_proxy_path = self._resolve_proxy_path()
+            if resolved_proxy_path:
+                kwargs["proxy_path"] = resolved_proxy_path
 
             self._hltv = Hltv(**kwargs)
             # Permite customizar headers para reduzir bloqueio por Cloudflare.
@@ -69,6 +71,34 @@ class HLTVScraper:
             if self.extra_headers:
                 self._hltv.headers.update({str(k): str(v) for k, v in self.extra_headers.items()})
         return self._hltv
+
+    def _resolve_proxy_path(self) -> str | None:
+        proxy_path = _safe_str(self.proxy_path)
+        if not proxy_path:
+            return None
+
+        raw = Path(proxy_path)
+        candidates = [raw]
+        if not raw.is_absolute():
+            candidates.extend(
+                [
+                    Path("/app") / raw,
+                    Path("/app/data") / raw,
+                    Path("data") / raw,
+                ]
+            )
+
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+
+        logger.warning(
+            "[HLTV] proxy_path configurado mas arquivo nao encontrado: %s. "
+            "Tentados: %s. Seguindo sem proxy.",
+            proxy_path,
+            ", ".join(str(c) for c in candidates),
+        )
+        return None
 
     async def close(self):
         if self._hltv:
