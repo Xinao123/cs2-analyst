@@ -159,6 +159,76 @@ class Notifier:
             f"🏦 Banca: R$ {summary.get('bankroll', 0):.2f}"
         )
 
+    def daily_top5_audit_report(self, summary: dict):
+        """Relatorio diario de auditoria do Top 5 oficial."""
+        run_date = _safe_text(summary.get("run_date"))
+        run_date_fmt = _format_date_only(run_date) if run_date else "data indefinida"
+
+        if not summary.get("found"):
+            self._send(
+                "\n".join(
+                    [
+                        "🧾 <b>Auditoria diária Top 5</b>",
+                        f"{'━' * 30}",
+                        f"📅 Carteira: {run_date_fmt}",
+                        "ℹ️ Nenhuma carteira oficial encontrada para a data.",
+                    ]
+                )
+            )
+            return
+
+        items = summary.get("items", []) or []
+        wins = int(summary.get("wins", 0))
+        losses = int(summary.get("losses", 0))
+        pending = int(summary.get("pending", 0))
+        resolved = int(summary.get("resolved", 0))
+        total = int(summary.get("total", len(items)))
+        accuracy = float(summary.get("accuracy", 0.0))
+
+        if not items:
+            self._send(
+                "\n".join(
+                    [
+                        "🧾 <b>Auditoria diária Top 5</b>",
+                        f"{'━' * 30}",
+                        f"📅 Carteira: {run_date_fmt}",
+                        "ℹ️ Carteira registrada sem picks válidos.",
+                    ]
+                )
+            )
+            return
+
+        lines = [
+            "🧾 <b>Auditoria diária Top 5</b>",
+            f"{'━' * 30}",
+            f"📅 Carteira: {run_date_fmt}",
+            f"✅ Acertos: {wins} | ❌ Erros: {losses} | ⏳ Pendentes: {pending}",
+            f"🎯 Accuracy (resolvidas): {accuracy:.1f}% ({wins}/{resolved})",
+            "",
+        ]
+
+        for item in items:
+            status = _safe_text(item.get("outcome_status", "pending"))
+            icon = "⏳"
+            if status == "win":
+                icon = "✅"
+            elif status == "loss":
+                icon = "❌"
+
+            rank = int(item.get("rank", 0))
+            t1 = _safe_text(item.get("team1_name", "Team 1"))
+            t2 = _safe_text(item.get("team2_name", "Team 2"))
+            pick = _safe_text(item.get("predicted_winner_name", "-"))
+            res_method = _safe_text(item.get("resolution_method", ""))
+            res_suffix = f" ({res_method})" if res_method else ""
+            lines.append(
+                f"{icon} {rank}. <b>{_html_escape(t1)} vs {_html_escape(t2)}</b> | Pick: {_html_escape(pick)}{_html_escape(res_suffix)}"
+            )
+
+        lines.append("")
+        lines.append(f"📌 Total auditado: {total}")
+        self._send("\n".join(lines))
+
     def model_trained(self, metrics: dict):
         """Notifica sobre treinamento do modelo."""
         self._send(
@@ -211,3 +281,21 @@ def _format_short_datetime(value) -> str:
     if parsed is None:
         return text
     return parsed.strftime("%d/%m %H:%M")
+
+
+def _format_date_only(value) -> str:
+    text = _safe_text(value)
+    if not text:
+        return "Data indefinida"
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.strftime("%d/%m/%Y")
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    return text

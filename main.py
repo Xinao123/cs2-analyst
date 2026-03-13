@@ -35,6 +35,7 @@ from scraper.odds import OddsPapiSync
 from analysis.features import FeatureExtractor
 from analysis.predictor import Predictor
 from analysis.value import ValueDetector
+from analysis.daily_top5_audit import DailyTop5Auditor
 from alerts.telegram import Notifier
 
 # ============================================================
@@ -84,6 +85,7 @@ async def analyze_upcoming(
     value_detector: ValueDetector,
     notifier: Notifier,
     config: dict,
+    daily_auditor: DailyTop5Auditor | None = None,
 ) -> int:
     """
     Analisa partidas futuras e separa as melhores oportunidades para aposta.
@@ -209,6 +211,27 @@ async def analyze_upcoming(
         reverse=True,
     )
     top_picks = value_candidates[:top_bets_count]
+    if daily_auditor:
+        capture = daily_auditor.capture_daily_top5(
+            picks=top_picks,
+            requested_top=top_bets_count,
+            total_candidates=len(candidates),
+            candidates_with_odds=candidates_with_odds,
+        )
+        if capture.get("created"):
+            logger.info(
+                "[AUDIT] Carteira Top 5 do dia congelada: data=%s status=%s itens=%s",
+                capture.get("run_date"),
+                capture.get("status"),
+                capture.get("items"),
+            )
+        else:
+            logger.info(
+                "[AUDIT] Carteira diaria ja existe: data=%s status=%s",
+                capture.get("run_date"),
+                capture.get("status"),
+            )
+
     notifier.top_picks_alert(
         top_picks,
         total_candidates=len(candidates),
@@ -318,6 +341,7 @@ async def run(config: dict, once: bool = False):
     value_detector = ValueDetector(config)
     notifier = Notifier(config)
     odds_sync = OddsPapiSync(db, config)
+    daily_auditor = DailyTop5Auditor(db, config, notifier)
 
     interval = config.get("scheduler", {}).get("scan_interval", 60) * 60  # em segundos
     daily_hour = config.get("scheduler", {}).get("daily_update_hour", 6)
@@ -326,6 +350,7 @@ async def run(config: dict, once: bool = False):
         if odds_sync.enabled
         else float("inf")
     )
+    next_audit_probe_at = time.time()
 
     # Banner
     logger.info("=" * 50)
@@ -365,13 +390,25 @@ async def run(config: dict, once: bool = False):
             await scraper.scrape_results()
             await scraper.close()
 
+            if daily_auditor.enabled:
+                await asyncio.to_thread(daily_auditor.run_if_due)
+                next_audit_probe_at = time.time() + 30
+
             # Atualiza odds reais antes da analise (uma vez no --once e a cada ciclo normal)
             if odds_sync.enabled:
                 next_odds_sync_at = time.time() + odds_sync.refresh_seconds
                 await asyncio.to_thread(odds_sync.sync_upcoming_odds)
 
             # Analisa partidas futuras
-            await analyze_upcoming(db, features_ext, predictor, value_detector, notifier, config)
+            await analyze_upcoming(
+                db,
+                features_ext,
+                predictor,
+                value_detector,
+                notifier,
+                config,
+                daily_auditor=daily_auditor,
+            )
 
             if once:
                 logger.info("Modo --once: encerrando.")
@@ -389,6 +426,9 @@ async def run(config: dict, once: bool = False):
             if odds_sync.enabled and time.time() >= next_odds_sync_at:
                 next_odds_sync_at = time.time() + odds_sync.refresh_seconds
                 await asyncio.to_thread(odds_sync.sync_upcoming_odds)
+            if daily_auditor.enabled and time.time() >= next_audit_probe_at:
+                next_audit_probe_at = time.time() + 30
+                await asyncio.to_thread(daily_auditor.run_if_due)
             await asyncio.sleep(1)
 
     logger.info("ðŸ‘‹ Bot encerrado.")

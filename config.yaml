@@ -82,7 +82,13 @@ bankroll:
 
 # Scheduler
 scheduler:
+  timezone: "America/Sao_Paulo"
   # Intervalo entre scans de partidas futuras (minutos)
   scan_interval: 60
   # Hora do scrape diario de stats (formato 24h)
   daily_update_hour: 6
+  daily_top5_audit_enabled: true
+  daily_audit_hour: 0
+  daily_audit_minute: 30
+  audit_match_window_hours: 6
+  audit_pending_max_days: 3

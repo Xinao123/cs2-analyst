@@ -150,6 +150,53 @@ CREATE TABLE IF NOT EXISTS odds_snapshots (
     FOREIGN KEY (match_id) REFERENCES matches(id)
 );
 
+CREATE TABLE IF NOT EXISTS daily_top5_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date TEXT NOT NULL UNIQUE,
+    requested_top INTEGER DEFAULT 5,
+    total_candidates INTEGER DEFAULT 0,
+    candidates_with_odds INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'captured',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    audited_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS daily_top5_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    rank INTEGER NOT NULL,
+    match_id INTEGER,
+    match_date TEXT,
+    event_name TEXT,
+    team1_id INTEGER,
+    team2_id INTEGER,
+    team1_name TEXT,
+    team2_name TEXT,
+    predicted_winner_id INTEGER,
+    predicted_winner_name TEXT,
+    team1_win_prob REAL,
+    team2_win_prob REAL,
+    confidence REAL,
+    score REAL,
+    odds REAL,
+    bookmaker TEXT,
+    value_pct REAL,
+    expected_value REAL,
+    outcome_status TEXT DEFAULT 'pending',
+    actual_winner_id INTEGER,
+    resolved_match_id INTEGER,
+    resolved_at TEXT,
+    resolution_method TEXT,
+    FOREIGN KEY (run_id) REFERENCES daily_top5_runs(id),
+    UNIQUE(run_id, rank)
+);
+
+CREATE TABLE IF NOT EXISTS app_state (
+    state_key TEXT PRIMARY KEY,
+    state_value TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(date);
 CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
 CREATE INDEX IF NOT EXISTS idx_matches_teams ON matches(team1_id, team2_id);
@@ -157,6 +204,9 @@ CREATE INDEX IF NOT EXISTS idx_players_team ON players(team_id);
 CREATE INDEX IF NOT EXISTS idx_match_maps_match ON match_maps(match_id);
 CREATE INDEX IF NOT EXISTS idx_odds_latest_updated ON match_odds_latest(updated_at);
 CREATE INDEX IF NOT EXISTS idx_odds_snapshots_match ON odds_snapshots(match_id, collected_at);
+CREATE INDEX IF NOT EXISTS idx_daily_top5_runs_date ON daily_top5_runs(run_date);
+CREATE INDEX IF NOT EXISTS idx_daily_top5_items_run ON daily_top5_items(run_id, rank);
+CREATE INDEX IF NOT EXISTS idx_daily_top5_items_outcome ON daily_top5_items(outcome_status, run_id);
 """
 
 
@@ -467,6 +517,203 @@ class Database:
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ============================================================
+    # Daily Top 5
+    # ============================================================
+
+    def get_daily_top5_run(self, run_date: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM daily_top5_runs WHERE run_date=? LIMIT 1",
+                (run_date,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_daily_top5_latest_run(self) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM daily_top5_runs ORDER BY run_date DESC LIMIT 1"
+            ).fetchone()
+            return dict(row) if row else None
+
+    def create_daily_top5_run(
+        self,
+        run_date: str,
+        requested_top: int,
+        total_candidates: int,
+        candidates_with_odds: int,
+        status: str,
+    ) -> int:
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO daily_top5_runs
+                     (run_date, requested_top, total_candidates, candidates_with_odds, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    run_date,
+                    requested_top,
+                    total_candidates,
+                    candidates_with_odds,
+                    status,
+                    datetime.now().isoformat(),
+                ),
+            )
+            row = conn.execute(
+                "SELECT id FROM daily_top5_runs WHERE run_date=?",
+                (run_date,),
+            ).fetchone()
+            return row["id"] if row else 0
+
+    def save_daily_top5_items(self, run_id: int, picks: list[dict]):
+        with self.connect() as conn:
+            for item in picks:
+                conn.execute(
+                    """INSERT OR REPLACE INTO daily_top5_items
+                         (run_id, rank, match_id, match_date, event_name, team1_id, team2_id,
+                          team1_name, team2_name, predicted_winner_id, predicted_winner_name,
+                          team1_win_prob, team2_win_prob, confidence, score, odds, bookmaker,
+                          value_pct, expected_value, outcome_status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        run_id,
+                        item.get("rank", 0),
+                        item.get("match_id"),
+                        item.get("match_date", ""),
+                        item.get("event_name", ""),
+                        item.get("team1_id"),
+                        item.get("team2_id"),
+                        item.get("team1_name", ""),
+                        item.get("team2_name", ""),
+                        item.get("predicted_winner_id"),
+                        item.get("predicted_winner_name", ""),
+                        item.get("team1_win_prob"),
+                        item.get("team2_win_prob"),
+                        item.get("confidence"),
+                        item.get("score"),
+                        item.get("odds"),
+                        item.get("bookmaker", ""),
+                        item.get("value_pct"),
+                        item.get("expected_value"),
+                        item.get("outcome_status", "pending"),
+                    ),
+                )
+
+    def get_daily_top5_items(self, run_id: int) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM daily_top5_items WHERE run_id=? ORDER BY rank ASC",
+                (run_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_daily_top5_runs_with_pending(self, limit_days: int = 3) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT r.*
+                   FROM daily_top5_runs r
+                   WHERE r.run_date >= date('now', ?)
+                     AND EXISTS (
+                         SELECT 1 FROM daily_top5_items i
+                         WHERE i.run_id = r.id AND i.outcome_status='pending'
+                     )
+                   ORDER BY r.run_date DESC""",
+                (f"-{max(1, int(limit_days))} days",),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_daily_top5_item_outcome(
+        self,
+        item_id: int,
+        outcome_status: str,
+        actual_winner_id: int | None = None,
+        resolved_match_id: int | None = None,
+        resolution_method: str = "",
+    ):
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE daily_top5_items
+                   SET outcome_status=?,
+                       actual_winner_id=?,
+                       resolved_match_id=?,
+                       resolved_at=?,
+                       resolution_method=?
+                   WHERE id=?""",
+                (
+                    outcome_status,
+                    actual_winner_id,
+                    resolved_match_id,
+                    datetime.now().isoformat(),
+                    resolution_method,
+                    item_id,
+                ),
+            )
+
+    def update_daily_top5_run_audited(self, run_id: int, status: str):
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE daily_top5_runs
+                   SET status=?, audited_at=?
+                   WHERE id=?""",
+                (
+                    status,
+                    datetime.now().isoformat(),
+                    run_id,
+                ),
+            )
+
+    def get_match_result_by_id(self, match_id: int) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT m.*, t1.name AS team1_name, t2.name AS team2_name
+                   FROM matches m
+                   JOIN teams t1 ON t1.id=m.team1_id
+                   JOIN teams t2 ON t2.id=m.team2_id
+                   WHERE m.id=?
+                   LIMIT 1""",
+                (match_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_completed_matches_between(self, start_iso: str, end_iso: str) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT m.*, t1.name AS team1_name, t2.name AS team2_name
+                   FROM matches m
+                   JOIN teams t1 ON t1.id=m.team1_id
+                   JOIN teams t2 ON t2.id=m.team2_id
+                   WHERE m.status='completed'
+                     AND m.date >= ?
+                     AND m.date <= ?
+                   ORDER BY m.date ASC""",
+                (start_iso, end_iso),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # ============================================================
+    # App State
+    # ============================================================
+
+    def get_state(self, state_key: str, default: str = "") -> str:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT state_value FROM app_state WHERE state_key=? LIMIT 1",
+                (state_key,),
+            ).fetchone()
+            if not row:
+                return default
+            return row["state_value"] if row["state_value"] is not None else default
+
+    def set_state(self, state_key: str, state_value: str):
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO app_state (state_key, state_value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(state_key) DO UPDATE SET
+                     state_value=excluded.state_value,
+                     updated_at=excluded.updated_at""",
+                (state_key, state_value, datetime.now().isoformat()),
+            )
 
     # ============================================================
     # Stats
