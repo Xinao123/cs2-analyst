@@ -1,19 +1,19 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-CS2 Analyst Bot — Ponto de entrada.
+CS2 Analyst Bot â€” Ponto de entrada.
 
-Pipeline contínuo:
+Pipeline contÃ­nuo:
 1. Atualiza dados do HLTV (ranking, resultados, partidas futuras)
 2. Pra cada partida futura:
    a. Extrai features dos dois times
    b. Roda o modelo preditivo
-   c. Compara com odds (se disponíveis)
+   c. Compara com odds (se disponÃ­veis)
    d. Detecta value bets
    e. Envia alerta no Telegram
 3. Aguarda intervalo e repete
 
 Uso:
-    python main.py                   # Roda contínuo
+    python main.py                   # Roda contÃ­nuo
     python main.py --once            # Roda uma vez e sai
     python main.py --train           # Re-treina o modelo
     python main.py --stats           # Mostra stats do banco
@@ -55,7 +55,7 @@ _running = True
 
 def _signal_handler(sig, frame):
     global _running
-    logger.info("⏹ Encerrando...")
+    logger.info("â¹ Encerrando...")
     _running = False
 
 
@@ -82,15 +82,16 @@ async def analyze_upcoming(
     predictor: Predictor,
     value_detector: ValueDetector,
     notifier: Notifier,
+    config: dict,
 ) -> int:
     """
-    Analisa todas as partidas futuras.
+    Analisa partidas futuras e separa as melhores oportunidades para aposta.
 
     Returns:
-        Número de value bets detectados
+        Numero de value bets encontrados no ciclo
     """
     if not predictor.is_trained:
-        logger.warning("[ANALYSIS] Modelo não treinado — rode: python main.py --train")
+        logger.warning("[ANALYSIS] Modelo nao treinado - rode: python main.py --train")
         return 0
 
     upcoming = db.get_upcoming_matches()
@@ -98,43 +99,44 @@ async def analyze_upcoming(
         logger.info("[ANALYSIS] Nenhuma partida futura no banco")
         return 0
 
-    logger.info(f"[ANALYSIS] Analisando {len(upcoming)} partidas futuras...")
+    logger.info("[ANALYSIS] Analisando %s partidas futuras...", len(upcoming))
     value_count = 0
     analyzed = 0
     skipped_no_features = 0
     skipped_no_prediction = 0
+    top_bets_count = max(1, int(config.get("model", {}).get("top_bets_count", 5)))
+    candidates: list[dict] = []
 
     for match in upcoming:
-        # Extrai features
         features = features_ext.extract(match)
         if not features:
             skipped_no_features += 1
             continue
 
-        # Predição
         prediction = predictor.predict(features)
         if not prediction:
             skipped_no_prediction += 1
             continue
 
         analyzed += 1
-
-        # Detecção de value (sem odds por enquanto — só predição)
-        # Quando tiver integração com API de odds, passa aqui
         analysis = value_detector.analyze(
             prediction=prediction,
             odds_team1=match.get("odds_team1"),
             odds_team2=match.get("odds_team2"),
             match=match,
         )
-
         if not analysis:
-            continue
+            analysis = {
+                "team1_win_prob": prediction["team1_win_prob"],
+                "team2_win_prob": prediction["team2_win_prob"],
+                "confidence": prediction["confidence"],
+                "predicted_winner": prediction["predicted_winner"],
+                "has_value": False,
+                "value_bets": [],
+                "odds_team1": match.get("odds_team1"),
+                "odds_team2": match.get("odds_team2"),
+            }
 
-        # Gera relatório
-        report = value_detector.generate_report(analysis, match)
-
-        # Salva predição no banco
         predicted_winner_id = (
             match["team1_id"] if prediction["predicted_winner"] == 1
             else match["team2_id"]
@@ -146,21 +148,41 @@ async def analyze_upcoming(
             team2_win_prob=prediction["team2_win_prob"],
         )
 
-        # Envia alerta
-        if analysis.get("has_value"):
-            notifier.value_bet_alert(report, match)
-            value_count += 1
-        elif prediction["confidence"] >= 65:
-            # Envia mesmo sem value se confiança alta (informativo)
-            notifier.prediction_alert(report, match)
+        score = _score_bet_candidate(prediction, analysis, features)
+        candidates.append(
+            {
+                "match": match,
+                "prediction": prediction,
+                "analysis": analysis,
+                "score": score,
+            }
+        )
 
-        # Log
-        t1 = match.get("team1_name", "?")
-        t2 = match.get("team2_name", "?")
-        p1 = prediction["team1_win_prob"]
-        p2 = prediction["team2_win_prob"]
-        conf = prediction["confidence"]
-        logger.info(f"  {t1} ({p1:.0f}%) vs {t2} ({p2:.0f}%) — confiança {conf:.0f}%")
+        if analysis.get("has_value"):
+            value_count += 1
+
+        logger.info(
+            "  %s (%s%%) vs %s (%s%%) | confianca=%s%% | score=%.2f",
+            match.get("team1_name", "?"),
+            round(prediction["team1_win_prob"]),
+            match.get("team2_name", "?"),
+            round(prediction["team2_win_prob"]),
+            round(prediction["confidence"]),
+            score,
+        )
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    top_picks = candidates[:top_bets_count]
+    if top_picks:
+        notifier.top_picks_alert(top_picks, len(candidates), top_bets_count)
+        logger.info(
+            "[ANALYSIS] Top %s enviados (%s candidatos, %s com value no top)",
+            len(top_picks),
+            len(candidates),
+            sum(1 for item in top_picks if item["analysis"].get("has_value")),
+        )
+    else:
+        logger.info("[ANALYSIS] Nenhum candidato para top picks")
 
     logger.info(
         "[ANALYSIS] %s partidas analisadas, %s value bets (sem_features=%s, sem_pred=%s)",
@@ -170,6 +192,27 @@ async def analyze_upcoming(
         skipped_no_prediction,
     )
     return value_count
+
+
+def _score_bet_candidate(prediction: dict, analysis: dict, features: dict) -> float:
+    """Score de priorizacao para top picks."""
+    confidence = float(prediction.get("confidence", 0.0))
+    separation = abs(float(prediction.get("team1_win_prob", 50.0)) - float(prediction.get("team2_win_prob", 50.0)))
+    coverage = min(float(features.get("team1_matches_played", 0)), float(features.get("team2_matches_played", 0)))
+    h2h = float(features.get("h2h_matches", 0))
+
+    score = (confidence * 1.2) + (separation * 0.6)
+    score += min(coverage, 20.0) * 0.6
+    score += min(h2h, 10.0) * 0.4
+
+    value_bets = analysis.get("value_bets", [])
+    if value_bets:
+        best_vb = max(value_bets, key=lambda vb: float(vb.get("value_pct", 0.0)))
+        value_pct = float(best_vb.get("value_pct", 0.0))
+        expected_value = max(0.0, float(best_vb.get("expected_value", 0.0)))
+        score += (value_pct * 2.0) + (expected_value / 5.0)
+
+    return round(score, 4)
 
 
 async def update_data(db: Database, config: dict):
@@ -220,12 +263,12 @@ async def run(config: dict, once: bool = False):
 
     # Banner
     logger.info("=" * 50)
-    logger.info("  🎮 CS2 ANALYST BOT")
+    logger.info("  ðŸŽ® CS2 ANALYST BOT")
     logger.info("=" * 50)
 
     stats = db.get_stats()
     logger.info(f"  Times: {stats['teams']} | Partidas: {stats['completed_matches']}")
-    logger.info(f"  Modelo treinado: {'✅' if predictor.is_trained else '❌'}")
+    logger.info(f"  Modelo treinado: {'âœ…' if predictor.is_trained else 'âŒ'}")
     logger.info(f"  Intervalo: {interval // 60} min")
     logger.info("=" * 50)
 
@@ -237,9 +280,9 @@ async def run(config: dict, once: bool = False):
         try:
             now = datetime.now()
 
-            # Atualização diária de dados (ranking, stats)
+            # AtualizaÃ§Ã£o diÃ¡ria de dados (ranking, stats)
             if last_daily_update != now.date() and now.hour >= daily_hour:
-                logger.info("[SCHEDULER] Atualização diária de dados...")
+                logger.info("[SCHEDULER] AtualizaÃ§Ã£o diÃ¡ria de dados...")
                 await update_data(db, config)
                 last_daily_update = now.date()
 
@@ -257,24 +300,24 @@ async def run(config: dict, once: bool = False):
             await scraper.close()
 
             # Analisa partidas futuras
-            await analyze_upcoming(db, features_ext, predictor, value_detector, notifier)
+            await analyze_upcoming(db, features_ext, predictor, value_detector, notifier, config)
 
             if once:
                 logger.info("Modo --once: encerrando.")
                 break
 
         except Exception as e:
-            logger.exception(f"❌ Erro no loop: {e}")
+            logger.exception(f"âŒ Erro no loop: {e}")
             notifier.error(str(e))
 
-        # Aguarda próximo ciclo
-        logger.info(f"[SCHEDULER] Próximo scan em {interval // 60} min")
+        # Aguarda prÃ³ximo ciclo
+        logger.info(f"[SCHEDULER] PrÃ³ximo scan em {interval // 60} min")
         for _ in range(interval):
             if not _running:
                 break
             time.sleep(1)
 
-    logger.info("👋 Bot encerrado.")
+    logger.info("ðŸ‘‹ Bot encerrado.")
 
 
 # ============================================================
@@ -294,15 +337,15 @@ def main():
     if args.stats:
         db = Database(config["database"]["path"])
         stats = db.get_stats()
-        print(f"\n📊 CS2 Analyst — Stats do banco")
-        print(f"{'━' * 35}")
+        print(f"\nðŸ“Š CS2 Analyst â€” Stats do banco")
+        print(f"{'â”' * 35}")
         for k, v in stats.items():
             print(f"  {k}: {v}")
 
-        # Mostra últimas predições
+        # Mostra Ãºltimas prediÃ§Ãµes
         preds = db.get_prediction_history(5)
         if preds:
-            print(f"\n📋 Últimas predições:")
+            print(f"\nðŸ“‹ Ãšltimas prediÃ§Ãµes:")
             for p in preds:
                 t1 = p.get("team1_name", "?")
                 t2 = p.get("team2_name", "?")
@@ -315,7 +358,7 @@ def main():
         notifier = Notifier(config)
         metrics = train_model(db, config, notifier)
         if metrics and "error" not in metrics:
-            print(f"\n✅ Modelo treinado: {metrics['model']}")
+            print(f"\nâœ… Modelo treinado: {metrics['model']}")
             print(f"   CV Accuracy: {metrics['cv_accuracy']:.1f}%")
             print(f"   Train Accuracy: {metrics['train_accuracy']:.1f}%")
         return
@@ -325,3 +368,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

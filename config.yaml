@@ -1,5 +1,5 @@
 ﻿# ============================================================
-# CS2 ANALYST BOT â€” ConfiguraÃ§Ã£o
+# CS2 ANALYST BOT - Configuracao
 # ============================================================
 
 # Telegram
@@ -13,11 +13,11 @@ scraper:
   # Delay entre requests ao HLTV (respeitar rate limit)
   min_delay: 4.0
   max_delay: 10.0
-  # Proxy (opcional â€” recomendado se for scrape pesado)
+  # Proxy (opcional - recomendado se for scrape pesado)
   proxy_path: ""  # ex: "proxies.txt"
-  # Quantos meses de histÃ³rico buscar no backfill inicial
+  # Quantos meses de historico buscar no backfill inicial
   backfill_months: 6
-  # EstratÃ©gia de provider para partidas futuras
+  # Estrategia de provider para partidas futuras
   upcoming_provider: "pandascore"
   upcoming_fallback: "hltv"
   upcoming_days_ahead: 7
@@ -36,9 +36,11 @@ database:
 model:
   # Caminho onde salvar/carregar o modelo treinado
   path: "data/model.joblib"
-  # MÃ­nimo de partidas do time pra considerar nas features
+  # Minimo de partidas do time pra considerar nas features
   min_matches: 0
+  # Minimo de jogos recentes por time na inferencia ao vivo
   live_min_recent_matches: 0
+  # Minimo de jogos recentes por time no treino
   train_min_recent_matches: 0
   # Janela de forma recente (dias)
   form_window_days: 365
@@ -50,23 +52,22 @@ model:
   prediction_temperature: 0.9
   low_data_rank_blend: 0.35
   rank_prior_scale: 12.0
-  # MÃ­nimo de value (%) pra disparar alerta
+  # Minimo de value (%) pra disparar alerta
   min_value_pct: 4.0
-  # ConfianÃ§a mÃ­nima do modelo (%) pra considerar
+  # Confianca minima do modelo (%) pra considerar
   min_confidence: 55.0
+  # Quantidade de melhores partidas para ranking por ciclo
+  top_bets_count: 5
 
-# GestÃ£o de banca
+# Gestao de banca
 bankroll:
   total: 2000.0          # Banca total (R$)
-  max_bet_pct: 3.0        # MÃ¡ximo % da banca por aposta
-  kelly_fraction: 0.25    # FraÃ§Ã£o de Kelly (0.25 = quarter Kelly, conservador)
+  max_bet_pct: 3.0        # Maximo % da banca por aposta
+  kelly_fraction: 0.25    # Fracao de Kelly (0.25 = quarter Kelly, conservador)
 
 # Scheduler
 scheduler:
   # Intervalo entre scans de partidas futuras (minutos)
   scan_interval: 60
-  # Hora do scrape diÃ¡rio de stats (formato 24h)
+  # Hora do scrape diario de stats (formato 24h)
   daily_update_hour: 6
-
-
-

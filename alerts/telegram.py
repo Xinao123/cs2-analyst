@@ -1,5 +1,5 @@
-"""
-Telegram Alerts — Envia análises e value bets via Telegram.
+﻿"""
+Telegram Alerts - Envia analises e value bets via Telegram.
 """
 
 import logging
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class Notifier:
-    """Notificações via Telegram."""
+    """Notificacoes via Telegram."""
 
     def __init__(self, config: dict):
         tg = config.get("telegram", {})
@@ -42,7 +42,7 @@ class Notifier:
             f"{'━' * 26}\n"
             f"📅 {now}\n"
             f"👥 {stats.get('teams', 0)} times no banco\n"
-            f"🎯 {stats.get('completed_matches', 0)} partidas históricas\n"
+            f"🎯 {stats.get('completed_matches', 0)} partidas historicas\n"
             f"📋 {stats.get('upcoming_matches', 0)} partidas futuras\n"
             f"🤖 Analisando..."
         )
@@ -51,21 +51,69 @@ class Notifier:
         """Envia alerta de value bet."""
         now = datetime.now().strftime("%H:%M")
         self._send(
-            f"🔔 <b>VALUE BET DETECTADO</b> — {now}\n"
+            f"🔔 <b>VALUE BET DETECTADO</b> - {now}\n"
             f"{'━' * 30}\n\n"
             f"{_html_escape(report)}"
         )
 
     def prediction_alert(self, report: str, match: dict):
-        """Envia predição sem value (informativo)."""
+        """Envia predicao sem value (informativo)."""
         self._send(
-            f"📊 <b>Análise de partida</b>\n"
+            f"📊 <b>Analise de partida</b>\n"
             f"{'━' * 30}\n\n"
             f"{_html_escape(report)}"
         )
 
+    def top_picks_alert(self, picks: list[dict], total_candidates: int, requested_top: int):
+        """Envia ranking consolidado das melhores oportunidades."""
+        if not picks:
+            return
+
+        now = datetime.now().strftime("%d/%m %H:%M")
+        lines = [
+            f"🏆 <b>Top {len(picks)} apostas do ciclo</b>",
+            f"{'━' * 30}",
+            f"📅 {now}",
+            f"🔎 Candidatas: {total_candidates} (top solicitado: {requested_top})",
+            "",
+        ]
+
+        for idx, item in enumerate(picks, start=1):
+            match = item.get("match", {})
+            pred = item.get("prediction", {})
+            analysis = item.get("analysis", {})
+            score = float(item.get("score", 0.0))
+
+            t1 = _safe_text(match.get("team1_name", "Team 1"))
+            t2 = _safe_text(match.get("team2_name", "Team 2"))
+            event = _safe_text(match.get("event_name", ""))
+            when = _format_short_datetime(match.get("date"))
+            p1 = float(pred.get("team1_win_prob", 50.0))
+            p2 = float(pred.get("team2_win_prob", 50.0))
+            conf = float(pred.get("confidence", 50.0))
+            side = t1 if pred.get("predicted_winner") == 1 else t2
+
+            value_tag = ""
+            value_bets = analysis.get("value_bets", [])
+            if value_bets:
+                best_vb = max(value_bets, key=lambda vb: float(vb.get("value_pct", 0.0)))
+                value_tag = f" | VALUE +{float(best_vb.get('value_pct', 0.0)):.1f}%"
+
+            lines.extend(
+                [
+                    f"{idx}. <b>{_html_escape(t1)} vs {_html_escape(t2)}</b>",
+                    f"   🗓 {_html_escape(when)}",
+                    f"   🏆 {_html_escape(event) if event else '-'}",
+                    f"   🎯 Pick: {_html_escape(side)} ({p1:.1f}% x {p2:.1f}%, conf {conf:.1f}%)",
+                    f"   📌 Score: {score:.2f}{_html_escape(value_tag)}",
+                    "",
+                ]
+            )
+
+        self._send("\n".join(lines).rstrip())
+
     def daily_summary(self, summary: dict):
-        """Resumo diário de performance."""
+        """Resumo diario de performance."""
         total = summary.get("total_predictions", 0)
         correct = summary.get("correct", 0)
         accuracy = (correct / total * 100) if total > 0 else 0
@@ -99,5 +147,37 @@ class Notifier:
 
 
 def _html_escape(text: str) -> str:
-    """Escapa caracteres HTML mantendo tags que já temos."""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    """Escapa caracteres HTML mantendo tags que ja temos."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _safe_text(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _format_short_datetime(value) -> str:
+    text = _safe_text(value)
+    if not text:
+        return "Data indefinida"
+
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+    except ValueError:
+        pass
+
+    if parsed is None:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+
+    if parsed is None:
+        return text
+    return parsed.strftime("%d/%m %H:%M")
