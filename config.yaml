@@ -60,6 +60,11 @@ model:
   live_min_recent_matches: 5
   # Minimo de jogos recentes por time no treino
   train_min_recent_matches: 0
+  # Filtros conservadores de qualidade
+  exclude_synthetic_teams: true
+  exclude_academy_teams: true
+  # Evita leakage de roster em treino sem historico temporal de jogadores
+  use_player_features: false
   # Janela de forma recente (dias)
   form_window_days: 365
   # Calibracao e separacao de probabilidade
@@ -67,6 +72,14 @@ model:
   calibration_method: "sigmoid"
   calibration_min_samples: 80
   calibration_cv_splits: 3
+  # Robustez temporal
+  holdout_days: 14
+  recency_half_life_days: 120
+  min_train_samples: 120
+  min_class_samples: 30
+  confidence_auto_tune: true
+  confidence_grid: [60, 65, 70, 75, 80]
+  coverage_min_holdout: 0.15
   prediction_temperature: 0.9
   low_data_rank_blend: 0.35
   rank_prior_scale: 12.0

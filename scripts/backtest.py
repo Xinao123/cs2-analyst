@@ -42,7 +42,7 @@ def backtest(config: dict):
 
     # 1. Extrai features
     logger.info("\n[1/3] Extraindo features das partidas históricas...")
-    features_list, labels = features_extractor.extract_training_data()
+    features_list, labels, match_dates = features_extractor.extract_training_data(include_dates=True)
 
     if len(features_list) < 20:
         logger.error(
@@ -61,7 +61,7 @@ def backtest(config: dict):
 
     # 2. Treina modelo
     logger.info("\n[2/3] Treinando modelo...")
-    metrics = predictor.train(features_list, labels)
+    metrics = predictor.train(features_list, labels, match_dates=match_dates)
 
     if "error" in metrics:
         logger.error(f"Erro no treinamento: {metrics['error']}")
@@ -77,6 +77,15 @@ def backtest(config: dict):
     logger.info(f"  Train Accuracy: {metrics['train_accuracy']:.1f}%")
     logger.info(f"  Log Loss:       {metrics['train_logloss']:.4f}")
     logger.info(f"  Brier Score:    {metrics['train_brier']:.4f}")
+    logger.info(f"  Holdout N:      {metrics.get('holdout_size', 0)}")
+    logger.info(f"  Holdout Acc:    {metrics.get('holdout_accuracy', 0):.1f}%")
+    logger.info(f"  Holdout LogLoss:{metrics.get('holdout_logloss', 0):.4f}")
+    logger.info(f"  Holdout Brier:  {metrics.get('holdout_brier', 0):.4f}")
+    logger.info(f"  Conf. sugerida: {metrics.get('recommended_min_confidence', 0):.1f}%")
+    logger.info(
+        f"  Precision@thr:  {metrics.get('threshold_precision', 0):.1f}% "
+        f"(coverage={metrics.get('threshold_coverage', 0):.1f}%)"
+    )
     logger.info("")
     logger.info("  Top 10 features mais importantes:")
     for name, imp in metrics.get("top_features", [])[:10]:

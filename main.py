@@ -119,6 +119,8 @@ async def analyze_upcoming(
     top_bets_count = max(1, int(model_cfg.get("top_bets_count", 5)))
     min_minutes_before_match = max(0, int(model_cfg.get("min_minutes_before_match", 5)))
     min_confidence_filter = max(0.0, float(model_cfg.get("min_confidence", 70.0)))
+    if bool(model_cfg.get("confidence_auto_tune", True)):
+        min_confidence_filter = max(min_confidence_filter, float(getattr(predictor, "min_confidence", 0.0)))
     min_value_filter = max(0.0, float(model_cfg.get("min_value_pct", 8.0)))
     min_recent_matches = max(0, int(model_cfg.get("live_min_recent_matches", 5)))
     form_window_days = max(1, int(model_cfg.get("form_window_days", 365)))
@@ -461,14 +463,14 @@ def train_model(db: Database, config: dict, notifier: Notifier) -> dict:
     predictor = Predictor(config)
 
     logger.info("[TRAIN] Extraindo features...")
-    features_list, labels = features_ext.extract_training_data()
+    features_list, labels, match_dates = features_ext.extract_training_data(include_dates=True)
 
     if len(features_list) < 20:
         logger.error(f"[TRAIN] Dados insuficientes: {len(features_list)} amostras")
         return {}
 
     logger.info("[TRAIN] Treinando modelo...")
-    metrics = predictor.train(features_list, labels)
+    metrics = predictor.train(features_list, labels, match_dates=match_dates)
 
     if "error" not in metrics:
         notifier.model_trained(metrics)

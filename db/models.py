@@ -12,7 +12,7 @@ Tabelas:
 import sqlite3
 import logging
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
@@ -410,6 +410,30 @@ class Database:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_team_recent_matches_before(
+        self,
+        team_id: int,
+        before_date,
+        limit: int = 20,
+        days: int = 90,
+    ) -> list[dict]:
+        before_dt = _parse_dt(before_date)
+        if before_dt is None:
+            return self.get_team_recent_matches(team_id, limit=limit, days=days)
+
+        before_iso = before_dt.isoformat(timespec="seconds")
+        window_start = (before_dt - timedelta(days=max(1, int(days)))).isoformat(timespec="seconds")
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM matches
+                   WHERE (team1_id=? OR team2_id=?) AND status='completed'
+                     AND datetime(date) < datetime(?)
+                     AND datetime(date) >= datetime(?)
+                   ORDER BY date DESC LIMIT ?""",
+                (team_id, team_id, before_iso, window_start, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def get_h2h(self, team1_id: int, team2_id: int) -> list[dict]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -418,6 +442,29 @@ class Database:
                      AND ((team1_id=? AND team2_id=?) OR (team1_id=? AND team2_id=?))
                    ORDER BY date DESC LIMIT 10""",
                 (team1_id, team2_id, team2_id, team1_id),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_h2h_before(
+        self,
+        team1_id: int,
+        team2_id: int,
+        before_date,
+        limit: int = 10,
+    ) -> list[dict]:
+        before_dt = _parse_dt(before_date)
+        if before_dt is None:
+            return self.get_h2h(team1_id, team2_id)
+
+        before_iso = before_dt.isoformat(timespec="seconds")
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM matches
+                   WHERE status='completed'
+                     AND datetime(date) < datetime(?)
+                     AND ((team1_id=? AND team2_id=?) OR (team1_id=? AND team2_id=?))
+                   ORDER BY date DESC LIMIT ?""",
+                (before_iso, team1_id, team2_id, team2_id, team1_id, limit),
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -454,6 +501,84 @@ class Database:
                 "SELECT * FROM team_map_stats WHERE team_id=?", (team_id,)
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_team_map_stats_before(
+        self,
+        team_id: int,
+        before_date,
+        days: int = 365,
+        limit_matches: int = 300,
+    ) -> list[dict]:
+        before_dt = _parse_dt(before_date)
+        if before_dt is None:
+            return self.get_team_map_stats(team_id)
+
+        before_iso = before_dt.isoformat(timespec="seconds")
+        window_start = (before_dt - timedelta(days=max(1, int(days)))).isoformat(timespec="seconds")
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT m.team1_id, m.team2_id,
+                          mm.map_name,
+                          mm.team1_rounds, mm.team2_rounds,
+                          mm.team1_ct_rounds, mm.team1_t_rounds,
+                          mm.team2_ct_rounds, mm.team2_t_rounds,
+                          mm.winner_id
+                   FROM match_maps mm
+                   JOIN matches m ON m.id = mm.match_id
+                   WHERE m.status='completed'
+                     AND datetime(m.date) < datetime(?)
+                     AND datetime(m.date) >= datetime(?)
+                     AND (m.team1_id=? OR m.team2_id=?)
+                     AND mm.map_name IS NOT NULL
+                   ORDER BY m.date DESC
+                   LIMIT ?""",
+                (before_iso, window_start, team_id, team_id, max(1, int(limit_matches))),
+            ).fetchall()
+
+        by_map: dict[str, dict] = {}
+        for row in rows:
+            rec = dict(row)
+            map_name = str(rec.get("map_name", "")).strip()
+            if not map_name:
+                continue
+
+            stats = by_map.setdefault(
+                map_name,
+                {
+                    "team_id": team_id,
+                    "map_name": map_name,
+                    "matches_played": 0,
+                    "wins": 0,
+                    "win_rate": 0.0,
+                    "avg_rounds_won": 0.0,
+                    "ct_win_rate": 0.0,
+                    "t_win_rate": 0.0,
+                },
+            )
+
+            is_team1 = int(rec.get("team1_id", 0) or 0) == team_id
+            rounds_won = _safe_int(rec.get("team1_rounds")) if is_team1 else _safe_int(rec.get("team2_rounds"))
+            ct_rounds = _safe_int(rec.get("team1_ct_rounds")) if is_team1 else _safe_int(rec.get("team2_ct_rounds"))
+            t_rounds = _safe_int(rec.get("team1_t_rounds")) if is_team1 else _safe_int(rec.get("team2_t_rounds"))
+            won = int(rec.get("winner_id", 0) or 0) == team_id
+
+            stats["matches_played"] += 1
+            stats["wins"] += 1 if won else 0
+            stats["avg_rounds_won"] += rounds_won
+            stats["ct_win_rate"] += ct_rounds
+            stats["t_win_rate"] += t_rounds
+
+        output = []
+        for stats in by_map.values():
+            matches_played = max(1, int(stats["matches_played"]))
+            rounds_base = max(1, matches_played * 12)
+            stats["win_rate"] = (stats["wins"] / matches_played) * 100.0
+            stats["avg_rounds_won"] = stats["avg_rounds_won"] / matches_played
+            stats["ct_win_rate"] = (stats["ct_win_rate"] / rounds_base) * 100.0
+            stats["t_win_rate"] = (stats["t_win_rate"] / rounds_base) * 100.0
+            output.append(stats)
+
+        return output
 
     # ============================================================
     # Odds
@@ -772,3 +897,36 @@ class Database:
                 "completed_matches": matches, "upcoming_matches": upcoming,
                 "predictions": preds,
             }
+
+
+def _parse_dt(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
+                try:
+                    dt = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return None
+
+    if dt.tzinfo:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
