@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 from analysis.value import ValueDetector
 from db.models import Database
-from scraper.odds import OddsPapiSync, _index_local_matches
+from scraper.odds import (
+    OddsPapiSync,
+    _extract_bookmaker_quotes,
+    _index_local_matches,
+    _normalize_fixture_payload,
+)
 
 
 class OddsSyncTests(unittest.TestCase):
@@ -21,7 +26,7 @@ class OddsSyncTests(unittest.TestCase):
             "odds": {
                 "enabled": True,
                 "provider": "oddspapi",
-                "base_url": "https://api.oddspapi.io/v1",
+                "base_url": "https://api.oddspapi.io/v4",
                 "token_env": self.token_env,
                 "market": "h2h",
                 "refresh_minutes": 10,
@@ -83,6 +88,34 @@ class OddsSyncTests(unittest.TestCase):
         report = self.sync.sync_upcoming_odds()
         self.assertIn("token_ausente", report["error"])
         self.assertEqual(0, report["saved"])
+
+    def test_normalize_v4_fixture_and_bookmaker_odds_payload(self):
+        fixture = _normalize_fixture_payload(
+            {
+                "fixtureId": 9991,
+                "participant1Name": "FURIA",
+                "participant2Name": "TYLOO",
+                "startTime": (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat(),
+                "competitionName": "ESL Challenger",
+            }
+        )
+        self.assertIsNotNone(fixture)
+        self.assertEqual("9991", fixture["fixture_id"])
+        self.assertEqual("FURIA", fixture["home_name"])
+        self.assertEqual("TYLOO", fixture["away_name"])
+
+        payload = {
+            "bookmakerOdds": {
+                "bet365": {
+                    "h2h": {"FURIA": 1.84, "TYLOO": 2.08},
+                }
+            }
+        }
+        quotes = _extract_bookmaker_quotes(payload, fixture)
+        self.assertEqual(2, len(quotes))
+        sides = {q["side"] for q in quotes}
+        self.assertEqual({"home", "away"}, sides)
+        self.assertEqual({"bet365"}, {q["bookmaker"] for q in quotes})
 
     def test_sync_persists_latest_and_snapshots_idempotently(self):
         os.environ[self.token_env] = "test-token"

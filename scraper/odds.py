@@ -47,7 +47,7 @@ class OddsPapiSync:
 
         self.enabled = bool(odds_cfg.get("enabled", True))
         self.provider = _safe_str(odds_cfg.get("provider", "oddspapi")).lower() or "oddspapi"
-        self.base_url = _safe_str(odds_cfg.get("base_url", "https://api.oddspapi.io/v1")).rstrip("/")
+        self.base_url = _safe_str(odds_cfg.get("base_url", "https://api.oddspapi.io/v4")).rstrip("/")
         self.token_env = _safe_str(odds_cfg.get("token_env", "ODDSPAPI_API_KEY")) or "ODDSPAPI_API_KEY"
         self.sport_id = _safe_str(odds_cfg.get("sport_id", ""))
         self.market = _safe_str(odds_cfg.get("market", "h2h")).lower() or "h2h"
@@ -280,10 +280,20 @@ class OddsPapiSync:
         for item in sports:
             if not isinstance(item, dict):
                 continue
-            sid = _safe_str(item.get("id", item.get("sport_id", item.get("key", ""))))
+            sid = _safe_str(
+                item.get(
+                    "sportId",
+                    item.get("sport_id", item.get("id", item.get("key", ""))),
+                )
+            )
             if not sid:
                 continue
-            name = _safe_str(item.get("name", item.get("title", item.get("slug", "")))).lower()
+            name = _safe_str(
+                item.get(
+                    "sportName",
+                    item.get("name", item.get("title", item.get("slug", ""))),
+                )
+            ).lower()
             score = _score_sport_name(name)
             if score > best_score:
                 best_score = score
@@ -306,6 +316,7 @@ class OddsPapiSync:
         for page in range(1, self.max_pages + 1):
             params = {
                 "sport": sport_id,
+                "sportId": sport_id,
                 "status": "upcoming",
                 "page": page,
                 "perPage": self.per_page,
@@ -313,6 +324,8 @@ class OddsPapiSync:
                 "endDate": end.isoformat(),
                 "from": now.isoformat(),
                 "to": end.isoformat(),
+                "startTimeFrom": now.isoformat(),
+                "startTimeTo": end.isoformat(),
             }
 
             payload = None
@@ -353,7 +366,9 @@ class OddsPapiSync:
     def _fetch_fixture_odds(self, token: str, sport_id: str, fixture_id: str) -> tuple[dict | list | None, str]:
         base_params = {
             "sport": sport_id,
+            "sportId": sport_id,
             "fixture": fixture_id,
+            "fixtureId": fixture_id,
             "market": self.market,
             "oddsFormat": "decimal",
             "bookmakers": ",".join(sorted(self.bookmaker_whitelist)),
@@ -381,6 +396,7 @@ class OddsPapiSync:
             "accept": "application/json",
             "user-agent": self.user_agent,
             "x-api-key": token,
+            "authorization": f"Bearer {token}",
         }
         query = dict(params)
         query["apiKey"] = token
@@ -671,6 +687,14 @@ def _extract_root_blocks(payload: dict | list) -> list:
     if not isinstance(payload, dict):
         return []
 
+    bookmaker_odds = payload.get("bookmakerOdds")
+    if isinstance(bookmaker_odds, dict):
+        out = []
+        for bookmaker_name, markets in bookmaker_odds.items():
+            out.append({"bookmakerName": _safe_str(bookmaker_name), "markets": markets})
+        if out:
+            return out
+
     for key in ("data", "results", "items", "bookmakerOdds", "bookmakers", "odds"):
         value = payload.get(key)
         if isinstance(value, list):
@@ -684,6 +708,9 @@ def _extract_markets(block: dict) -> list:
         if isinstance(value, list):
             return value
         if isinstance(value, dict):
+            # Dict payload (OddsPapi v4): {"h2h": {...}} or {"101": {...}}
+            if any(isinstance(v, dict) for v in value.values()):
+                return [{"marketKey": str(k), **(v if isinstance(v, dict) else {"odds": v})} for k, v in value.items()]
             return [value]
 
     odds_value = block.get("odds")
@@ -701,8 +728,22 @@ def _extract_outcomes(market: dict) -> list[dict]:
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
         if isinstance(value, dict):
+            # Map payload: {"Team A": 1.85, "Team B": 2.05, "Draw": 3.2}
+            if all(not isinstance(v, dict) for v in value.values()):
+                outcomes = []
+                for name, odd in value.items():
+                    outcomes.append({"name": str(name), "odds": odd})
+                return outcomes
             return [value]
-    return []
+    # Flat map payload: {"marketKey": "h2h", "Team A": 1.9, "Team B": 2.0}
+    outcomes = []
+    for key, value in market.items():
+        if key in {"key", "marketKey", "name", "marketName", "id", "marketId"}:
+            continue
+        odd = _safe_float(value)
+        if odd > 1.0:
+            outcomes.append({"name": str(key), "odds": odd})
+    return outcomes
 
 
 def _extract_bookmaker_name(block: dict) -> str:
@@ -812,12 +853,19 @@ def _normalize_fixture_payload(item: dict) -> dict | None:
     if not isinstance(item, dict):
         return None
 
-    fixture_id = _safe_str(item.get("id", item.get("fixture_id", item.get("key", ""))))
+    fixture_id = _safe_str(
+        item.get(
+            "fixtureId",
+            item.get("fixture_id", item.get("id", item.get("key", ""))),
+        )
+    )
     if not fixture_id:
         return None
 
     home_name = _extract_team_name(item, "home")
     away_name = _extract_team_name(item, "away")
+    home_name = home_name or _safe_str(item.get("participant1Name", item.get("team1Name", "")))
+    away_name = away_name or _safe_str(item.get("participant2Name", item.get("team2Name", "")))
 
     if not home_name or not away_name:
         participants = item.get("participants", item.get("teams", item.get("opponents", [])))
@@ -829,7 +877,8 @@ def _normalize_fixture_payload(item: dict) -> dict | None:
         return None
 
     start_value = (
-        item.get("start_date")
+        item.get("startTime")
+        or item.get("start_date")
         or item.get("startDate")
         or item.get("starts_at")
         or item.get("scheduled_at")
@@ -842,16 +891,14 @@ def _normalize_fixture_payload(item: dict) -> dict | None:
         return None
 
     event_name = _safe_str(
-        item.get(
-            "competition_name",
-            item.get(
-                "league_name",
-                item.get(
-                    "tournament_name",
-                    item.get("event_name", item.get("tournament", item.get("league", ""))),
-                ),
-            ),
-        )
+        item.get("competitionName")
+        or item.get("competition_name")
+        or item.get("league_name")
+        or item.get("tournamentName")
+        or item.get("tournament_name")
+        or item.get("event_name")
+        or item.get("tournament")
+        or item.get("league")
     )
     if isinstance(item.get("tournament"), dict):
         event_name = _safe_str(item["tournament"].get("name", event_name))
@@ -869,6 +916,10 @@ def _normalize_fixture_payload(item: dict) -> dict | None:
 
 def _extract_team_name(payload: dict, side: str) -> str:
     side = side.lower()
+    if side == "home":
+        side_alt = ("participant1Name", "team1Name", "participant1")
+    else:
+        side_alt = ("participant2Name", "team2Name", "participant2")
     keys = (
         f"{side}_name",
         f"{side}Name",
@@ -877,6 +928,7 @@ def _extract_team_name(payload: dict, side: str) -> str:
         f"{side}Team",
         f"{side}Competitor",
         f"{side}TeamName",
+        *side_alt,
     )
     for key in keys:
         value = payload.get(key)
@@ -903,7 +955,7 @@ def _coerce_list(payload) -> list:
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
-        for key in ("data", "results", "items", "fixtures"):
+        for key in ("data", "results", "items", "fixtures", "sports"):
             value = payload.get(key)
             if isinstance(value, list):
                 return value
@@ -930,7 +982,7 @@ def _score_sport_name(name: str) -> int:
 def _candidate_base_urls(base_url: str) -> list[str]:
     candidates = [_safe_str(base_url).rstrip("/")]
     if not candidates[0]:
-        candidates = ["https://api.oddspapi.io/v1"]
+        candidates = ["https://api.oddspapi.io/v4"]
 
     base = candidates[0]
     if "/v1" in base:
@@ -942,6 +994,9 @@ def _candidate_base_urls(base_url: str) -> list[str]:
     if "/v5" in base:
         candidates.append(base.replace("/v5", "/v4"))
         candidates.append(base.replace("/v5", "/v1"))
+    if all(token not in base for token in ("/v1", "/v4", "/v5")):
+        candidates.append(base + "/v4")
+        candidates.append(base + "/v1")
 
     out = []
     seen = set()

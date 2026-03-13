@@ -36,7 +36,7 @@ database:
 odds:
   enabled: true
   provider: "oddspapi"
-  base_url: "https://api.oddspapi.io/v1"
+  base_url: "https://api.oddspapi.io/v4"
   token_env: "ODDSPAPI_API_KEY"
   sport_id: ""
   market: "h2h"
