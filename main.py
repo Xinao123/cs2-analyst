@@ -120,7 +120,10 @@ async def analyze_upcoming(
     min_minutes_before_match = max(0, int(model_cfg.get("min_minutes_before_match", 5)))
     min_confidence_filter = max(0.0, float(model_cfg.get("min_confidence", 70.0)))
     if bool(model_cfg.get("confidence_auto_tune", True)):
-        min_confidence_filter = max(min_confidence_filter, float(getattr(predictor, "min_confidence", 0.0)))
+        tuned_conf = float(getattr(predictor, "min_confidence", 0.0))
+        if tuned_conf > 0:
+            # Auto-tune do treino define o threshold efetivo da inferencia.
+            min_confidence_filter = tuned_conf
     min_value_filter = max(0.0, float(model_cfg.get("min_value_pct", 8.0)))
     min_recent_matches = max(0, int(model_cfg.get("live_min_recent_matches", 5)))
     form_window_days = max(1, int(model_cfg.get("form_window_days", 365)))
@@ -130,6 +133,19 @@ async def analyze_upcoming(
     min_start_cutoff = datetime.now() + timedelta(minutes=min_minutes_before_match)
     approved_candidates: list[dict] = []
     candidates_with_odds = 0
+    total_upcoming_with_odds = sum(
+        1
+        for m in upcoming
+        if _safe_float(m.get("odds_team1")) > 1.0 and _safe_float(m.get("odds_team2")) > 1.0
+    )
+    logger.info(
+        "[ANALYSIS] Filtros ativos: min_conf=%.1f min_value=%.1f min_recent=%s odds_age<=%smin | com_odds_no_banco=%s",
+        min_confidence_filter,
+        min_value_filter,
+        min_recent_matches,
+        max_pick_odds_age_minutes,
+        total_upcoming_with_odds,
+    )
 
     for match in upcoming:
         match_dt = _parse_datetime(match.get("date"))
@@ -299,6 +315,12 @@ async def analyze_upcoming(
             analyzed,
             candidates_with_odds,
         )
+        if total_upcoming_with_odds > 0 and candidates_with_odds == 0:
+            logger.warning(
+                "[ANALYSIS] Odds existem no banco (%s), mas nenhum candidato com odds passou pelos filtros. "
+                "Revise min_recent/live e politica de sinteticos no live.",
+                total_upcoming_with_odds,
+            )
 
     logger.info(
         "[ANALYSIS] %s partidas analisadas, %s picks aprovadas "
