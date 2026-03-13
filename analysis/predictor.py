@@ -61,6 +61,7 @@ class Predictor:
         features_list: list[dict],
         labels: list[int],
         match_dates: list[str] | None = None,
+        sample_weights: list[float] | np.ndarray | None = None,
     ) -> dict:
         """
         Treina o modelo com dados historicos.
@@ -113,11 +114,17 @@ class Predictor:
         self.proba_model = self.pipeline
         self._is_calibrated = False
 
-        sample_weight = _build_recency_weights(
+        recency_weights = _build_recency_weights(
             match_dates=match_dates,
             total_samples=len(X),
             half_life_days=self.recency_half_life_days,
         )
+        quality_weights = _coerce_sample_weights(sample_weights, len(X))
+        sample_weight = np.clip(recency_weights * quality_weights, 0.01, 10.0)
+        weight_mean = float(np.mean(sample_weight)) if len(sample_weight) > 0 else 1.0
+        if weight_mean > 0:
+            sample_weight = sample_weight / weight_mean
+
         train_idx, holdout_idx = _temporal_split_indices(
             match_dates=match_dates,
             total_samples=len(X),
@@ -201,6 +208,9 @@ class Predictor:
             "threshold_precision": round(float(tuned_precision) * 100, 1),
             "threshold_coverage": round(float(tuned_coverage) * 100, 1),
             "calibrated": self._is_calibrated,
+            "sample_weight_mean": round(float(np.mean(sample_weight)), 3) if len(sample_weight) else 0.0,
+            "sample_weight_min": round(float(np.min(sample_weight)), 3) if len(sample_weight) else 0.0,
+            "sample_weight_max": round(float(np.max(sample_weight)), 3) if len(sample_weight) else 0.0,
             "top_features": importances[:10],
         }
 
@@ -519,6 +529,21 @@ def _build_recency_weights(
         weight = math.pow(0.5, delta_days / hl)
         weights.append(max(0.1, min(1.0, weight)))
     return np.array(weights, dtype=float)
+
+
+def _coerce_sample_weights(
+    sample_weights: list[float] | np.ndarray | None,
+    total_samples: int,
+) -> np.ndarray:
+    if sample_weights is None:
+        return np.ones(total_samples, dtype=float)
+
+    arr = np.asarray(sample_weights, dtype=float).reshape(-1)
+    if arr.size != total_samples:
+        return np.ones(total_samples, dtype=float)
+    arr = np.nan_to_num(arr, nan=1.0, posinf=1.0, neginf=1.0)
+    arr = np.clip(arr, 0.05, 10.0)
+    return arr
 
 
 def _temporal_split_indices(

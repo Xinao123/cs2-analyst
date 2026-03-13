@@ -110,6 +110,8 @@ class FeatureExtractorTemporalTests(unittest.TestCase):
         fx_legacy = FeatureExtractor(self.db, legacy_cfg)
         self.assertFalse(fx_legacy.exclude_synthetic_teams_live)
         self.assertFalse(fx_legacy.exclude_synthetic_teams_train)
+        self.assertTrue(fx_legacy.exclude_academy_teams_live)
+        self.assertTrue(fx_legacy.exclude_academy_teams_train)
 
     def test_extract_filters_academy_teams_when_enabled(self):
         self.db.upsert_team(3, "NAVI Junior", ranking=30)
@@ -123,6 +125,38 @@ class FeatureExtractorTemporalTests(unittest.TestCase):
         }
         feats = self.fx.extract(match, min_recent_matches=0)
         self.assertIsNone(feats)
+
+    def test_academy_split_allows_train_and_blocks_live(self):
+        cfg = {
+            "model": {
+                "form_window_days": 365,
+                "live_min_recent_matches": 0,
+                "train_min_recent_matches": 0,
+                "exclude_synthetic_teams_live": True,
+                "exclude_synthetic_teams_train": False,
+                "exclude_academy_teams_live": True,
+                "exclude_academy_teams_train": False,
+            }
+        }
+        fx = FeatureExtractor(self.db, cfg)
+        self.db.upsert_team(3, "NAVI Junior", ranking=30)
+        match = {
+            "team1_id": 3,
+            "team2_id": 2,
+            "date": "2026-03-11 10:00:00",
+            "best_of": 1,
+            "event_tier": 3,
+            "is_lan": 0,
+        }
+        self.assertIsNone(fx.extract(match, min_recent_matches=0))
+        self.assertIsNotNone(
+            fx.extract(
+                match,
+                min_recent_matches=0,
+                as_of_date=match["date"],
+                for_training=True,
+            )
+        )
 
 
 if __name__ == "__main__":

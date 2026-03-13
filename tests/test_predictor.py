@@ -105,6 +105,15 @@ class PredictorTests(unittest.TestCase):
         self.assertLess(p2, 40.0)
         self.assertGreater(p1 - p2, 20.0)
 
+    def test_train_accepts_quality_weights(self):
+        features, labels = self._build_dataset()
+        predictor = Predictor(self.config)
+        quality_weights = [0.7 if i % 3 == 0 else 1.0 for i in range(len(features))]
+        metrics = predictor.train(features, labels, sample_weights=quality_weights)
+        self.assertNotIn("error", metrics)
+        self.assertIn("sample_weight_mean", metrics)
+        self.assertGreater(metrics["sample_weight_max"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

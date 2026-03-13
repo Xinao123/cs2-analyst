@@ -27,6 +27,14 @@ scraper:
   # PandaScore
   pandascore_base_url: "https://api.pandascore.co"
   pandascore_token_env: "PANDASCORE_API_TOKEN"
+  # Historico para treino (agressivo, com controle de cota)
+  pandascore_history_enabled: true
+  pandascore_history_months: 12
+  pandascore_history_window_days: 7
+  pandascore_history_per_page: 100
+  pandascore_history_max_requests_per_hour: 800
+  pandascore_history_sync_interval_minutes: 30
+  pandascore_history_checkpoint_key: "pandascore_history_cursor"
 
 # Banco de dados
 database:
@@ -63,7 +71,11 @@ model:
   # Filtros conservadores de qualidade
   exclude_synthetic_teams_live: true
   exclude_synthetic_teams_train: false
-  exclude_academy_teams: true
+  exclude_academy_teams_live: true
+  exclude_academy_teams_train: false
+  # Pesos de qualidade para treino agressivo
+  train_weight_synthetic: 0.8
+  train_weight_academy: 0.7
   # Evita leakage de roster em treino sem historico temporal de jogadores
   use_player_features: false
   # Janela de forma recente (dias)

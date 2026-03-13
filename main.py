@@ -470,6 +470,25 @@ def _has_min_recent_data(
     return len(t1_recent) >= min_recent_matches and len(t2_recent) >= min_recent_matches
 
 
+def _build_training_quality_weights(config: dict, sample_quality: list[dict]) -> list[float]:
+    if not sample_quality:
+        return []
+
+    model_cfg = config.get("model", {})
+    synthetic_weight = max(0.05, float(model_cfg.get("train_weight_synthetic", 0.8)))
+    academy_weight = max(0.05, float(model_cfg.get("train_weight_academy", 0.7)))
+
+    weights: list[float] = []
+    for meta in sample_quality:
+        w = 1.0
+        if bool(meta.get("is_synthetic")):
+            w *= synthetic_weight
+        if bool(meta.get("is_academy")):
+            w *= academy_weight
+        weights.append(max(0.05, min(10.0, w)))
+    return weights
+
+
 async def update_data(db: Database, config: dict):
     """Atualiza dados do HLTV."""
     scraper = HLTVScraper(db, config)
@@ -479,13 +498,27 @@ async def update_data(db: Database, config: dict):
         await scraper.close()
 
 
+async def bootstrap_train_data(config: dict) -> dict:
+    """Executa bootstrap agressivo de historico PandaScore para treino."""
+    db = Database(config["database"]["path"])
+    scraper = HLTVScraper(db, config)
+    try:
+        report = await asyncio.to_thread(scraper.sync_pandascore_history, True, True)
+    finally:
+        await scraper.close()
+    return report
+
+
 def train_model(db: Database, config: dict, notifier: Notifier) -> dict:
     """Treina/re-treina o modelo."""
     features_ext = FeatureExtractor(db, config)
     predictor = Predictor(config)
 
     logger.info("[TRAIN] Extraindo features...")
-    features_list, labels, match_dates = features_ext.extract_training_data(include_dates=True)
+    features_list, labels, match_dates, sample_quality = features_ext.extract_training_data(
+        include_dates=True,
+        include_quality=True,
+    )
     stats = getattr(features_ext, "last_training_stats", {}) or {}
     if stats:
         logger.info(
@@ -506,8 +539,17 @@ def train_model(db: Database, config: dict, notifier: Notifier) -> dict:
             stats.get("exclude_synthetic_train", True),
             stats.get("exclude_synthetic_live", True),
         )
+        logger.info(
+            "[TRAIN] Academy policy: train=%s live=%s | included(synth=%s, academy=%s)",
+            stats.get("exclude_academy_train", True),
+            stats.get("exclude_academy_live", True),
+            stats.get("included_synthetic", 0),
+            stats.get("included_academy", 0),
+        )
         if not bool(stats.get("exclude_synthetic_train", True)):
             logger.info("[TRAIN] Modo relaxed-train ativo: times sinteticos permitidos no treino.")
+        if not bool(stats.get("exclude_academy_train", True)):
+            logger.info("[TRAIN] Modo relaxed-train ativo: academies permitidas no treino.")
 
     if len(features_list) < 20:
         reason = f"dados_insuficientes:{len(features_list)}"
@@ -518,8 +560,23 @@ def train_model(db: Database, config: dict, notifier: Notifier) -> dict:
             "samples": len(features_list),
         }
 
+    quality_weights = _build_training_quality_weights(config, sample_quality)
+    if quality_weights:
+        logger.info(
+            "[TRAIN] Pesos de qualidade: media=%.3f min=%.3f max=%.3f (n=%s)",
+            sum(quality_weights) / len(quality_weights),
+            min(quality_weights),
+            max(quality_weights),
+            len(quality_weights),
+        )
+
     logger.info("[TRAIN] Treinando modelo...")
-    metrics = predictor.train(features_list, labels, match_dates=match_dates)
+    metrics = predictor.train(
+        features_list,
+        labels,
+        match_dates=match_dates,
+        sample_weights=quality_weights,
+    )
 
     if "error" in metrics:
         logger.warning(
@@ -551,16 +608,24 @@ async def run(config: dict, once: bool = False):
     notifier = Notifier(config)
     odds_sync = OddsPapiSync(db, config)
     daily_auditor = DailyTop5Auditor(db, config, notifier)
+    history_scraper = HLTVScraper(db, config)
 
     interval = config.get("scheduler", {}).get("scan_interval", 60) * 60  # em segundos
     daily_hour = config.get("scheduler", {}).get("daily_update_hour", 6)
     odds_cfg = config.get("odds", {})
+    scraper_cfg = config.get("scraper", {})
     odds_sync_during_wait = bool(odds_cfg.get("sync_during_wait", False))
     next_odds_sync_at = (
         time.time() + odds_sync.refresh_seconds
         if odds_sync.enabled and odds_sync_during_wait
         else float("inf")
     )
+    history_sync_enabled = bool(scraper_cfg.get("pandascore_history_enabled", True))
+    history_sync_seconds = max(
+        300,
+        int(scraper_cfg.get("pandascore_history_sync_interval_minutes", 30)) * 60,
+    )
+    next_history_sync_at = time.time() if history_sync_enabled else float("inf")
     next_audit_probe_at = time.time()
 
     # Banner
@@ -588,12 +653,40 @@ async def run(config: dict, once: bool = False):
                 await update_data(db, config)
                 last_daily_update = now.date()
 
+                if history_sync_enabled:
+                    history_report = await asyncio.to_thread(
+                        history_scraper.sync_pandascore_history,
+                        False,
+                        False,
+                    )
+                    if history_report.get("saved", 0) > 0:
+                        logger.info(
+                            "[HISTORY][pandascore] sincronizacao diaria: salvas=%s requests=%s",
+                            history_report.get("saved", 0),
+                            history_report.get("requests_used", 0),
+                        )
+                    next_history_sync_at = time.time() + history_sync_seconds
+
                 # Re-treina modelo com dados novos
                 stats = db.get_stats()
                 if stats["completed_matches"] >= 50:
                     metrics = train_model(db, config, notifier)
                     if metrics and not metrics.get("skipped") and "error" not in metrics:
                         predictor = Predictor(config)
+
+            if history_sync_enabled and time.time() >= next_history_sync_at:
+                history_report = await asyncio.to_thread(
+                    history_scraper.sync_pandascore_history,
+                    False,
+                    False,
+                )
+                if history_report.get("saved", 0) > 0:
+                    logger.info(
+                        "[HISTORY][pandascore] incremental: salvas=%s requests=%s",
+                        history_report.get("saved", 0),
+                        history_report.get("requests_used", 0),
+                    )
+                next_history_sync_at = time.time() + history_sync_seconds
 
             # Busca partidas futuras e resultados novos
             scraper = HLTVScraper(db, config)
@@ -638,11 +731,15 @@ async def run(config: dict, once: bool = False):
             if odds_sync.enabled and odds_sync_during_wait and time.time() >= next_odds_sync_at:
                 next_odds_sync_at = time.time() + odds_sync.refresh_seconds
                 await asyncio.to_thread(odds_sync.sync_upcoming_odds)
+            if history_sync_enabled and time.time() >= next_history_sync_at:
+                next_history_sync_at = time.time() + history_sync_seconds
+                await asyncio.to_thread(history_scraper.sync_pandascore_history, False, False)
             if daily_auditor.enabled and time.time() >= next_audit_probe_at:
                 next_audit_probe_at = time.time() + 30
                 await asyncio.to_thread(daily_auditor.run_if_due)
             await asyncio.sleep(1)
 
+    await history_scraper.close()
     logger.info("ðŸ‘‹ Bot encerrado.")
 
 
@@ -655,10 +752,26 @@ def main():
     parser.add_argument("--config", "-c", default="config.yaml")
     parser.add_argument("--once", action="store_true", help="Roda uma vez e sai")
     parser.add_argument("--train", action="store_true", help="Re-treina o modelo")
+    parser.add_argument(
+        "--bootstrap-train-data",
+        action="store_true",
+        help="Bootstrap agressivo de historico PandaScore para treino",
+    )
     parser.add_argument("--stats", action="store_true", help="Mostra stats do banco")
     args = parser.parse_args()
 
     config = load_config(args.config)
+
+    if args.bootstrap_train_data:
+        report = asyncio.run(bootstrap_train_data(config))
+        print("\n🚀 Bootstrap PandaScore (treino)")
+        print(f"   requests usados: {report.get('requests_used', 0)}")
+        print(f"   retornadas: {report.get('returned', 0)}")
+        print(f"   salvas: {report.get('saved', 0)}")
+        print(f"   descartadas: {report.get('discarded', 0)}")
+        if report.get("error"):
+            print(f"   aviso: {report.get('error')}")
+        return
 
     if args.stats:
         db = Database(config["database"]["path"])

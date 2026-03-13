@@ -50,7 +50,26 @@ class FeatureExtractor:
                 legacy_synth if legacy_synth is not None else True,
             )
         )
-        self.exclude_academy_teams = bool(model_cfg.get("exclude_academy_teams", True))
+        # Compat: chave antiga `exclude_academy_teams` vira fallback para live+train.
+        legacy_academy = model_cfg.get("exclude_academy_teams")
+        if legacy_academy is not None:
+            if "exclude_academy_teams_live" not in model_cfg or "exclude_academy_teams_train" not in model_cfg:
+                logger.warning(
+                    "[FEATURES] Config legado `exclude_academy_teams` detectado; "
+                    "use `exclude_academy_teams_live` e `exclude_academy_teams_train`."
+                )
+        self.exclude_academy_teams_live = bool(
+            model_cfg.get(
+                "exclude_academy_teams_live",
+                legacy_academy if legacy_academy is not None else True,
+            )
+        )
+        self.exclude_academy_teams_train = bool(
+            model_cfg.get(
+                "exclude_academy_teams_train",
+                legacy_academy if legacy_academy is not None else True,
+            )
+        )
         self.last_training_stats: dict = {}
 
     def extract(
@@ -85,7 +104,8 @@ class FeatureExtractor:
         if not t1 or not t2:
             return None
 
-        if self.exclude_academy_teams:
+        exclude_academy = self.exclude_academy_teams_train if for_training else self.exclude_academy_teams_live
+        if exclude_academy:
             if _is_academy_name(t1.get("name", "")) or _is_academy_name(t2.get("name", "")):
                 return None
 
@@ -217,7 +237,13 @@ class FeatureExtractor:
     def extract_training_data(
         self,
         include_dates: bool = False,
-    ) -> tuple[list[dict], list[int]] | tuple[list[dict], list[int], list[str]]:
+        include_quality: bool = False,
+    ) -> (
+        tuple[list[dict], list[int]]
+        | tuple[list[dict], list[int], list[str]]
+        | tuple[list[dict], list[int], list[dict]]
+        | tuple[list[dict], list[int], list[str], list[dict]]
+    ):
         """
         Extrai features e labels de todas as partidas completadas.
 
@@ -238,13 +264,17 @@ class FeatureExtractor:
         skipped_academy = 0
         skipped_invalid_label = 0
         skipped_low_data = 0
+        included_synthetic = 0
+        included_academy = 0
         match_dates: list[str] = []
+        sample_quality: list[dict] = []
 
         for row in rows:
             match = dict(row)
             team1_id = int(match.get("team1_id", 0) or 0)
             team2_id = int(match.get("team2_id", 0) or 0)
             winner_id = int(match.get("winner_id", 0) or 0)
+            is_synthetic = team1_id <= 0 or team2_id <= 0
 
             if self.exclude_synthetic_teams_train and (team1_id <= 0 or team2_id <= 0):
                 skipped += 1
@@ -253,9 +283,8 @@ class FeatureExtractor:
 
             t1 = self.db.get_team(team1_id) or {}
             t2 = self.db.get_team(team2_id) or {}
-            if self.exclude_academy_teams and (
-                _is_academy_name(t1.get("name", "")) or _is_academy_name(t2.get("name", ""))
-            ):
+            is_academy = _is_academy_name(t1.get("name", "")) or _is_academy_name(t2.get("name", ""))
+            if self.exclude_academy_teams_train and is_academy:
                 skipped += 1
                 skipped_academy += 1
                 continue
@@ -280,6 +309,16 @@ class FeatureExtractor:
             features_list.append(feats)
             labels.append(label)
             match_dates.append(str(match.get("date", "")))
+            sample_quality.append(
+                {
+                    "is_synthetic": bool(is_synthetic),
+                    "is_academy": bool(is_academy),
+                }
+            )
+            if is_synthetic:
+                included_synthetic += 1
+            if is_academy:
+                included_academy += 1
 
         class_t1 = int(sum(1 for y in labels if y == 1))
         class_t2 = int(sum(1 for y in labels if y == 0))
@@ -291,23 +330,34 @@ class FeatureExtractor:
             "discarded_academy": skipped_academy,
             "discarded_invalid_label": skipped_invalid_label,
             "discarded_low_data": skipped_low_data,
+            "included_synthetic": included_synthetic,
+            "included_academy": included_academy,
             "class_team1": class_t1,
             "class_team2": class_t2,
             "min_recent_train": int(self.train_min_recent_matches),
             "exclude_synthetic_train": bool(self.exclude_synthetic_teams_train),
             "exclude_synthetic_live": bool(self.exclude_synthetic_teams_live),
+            "exclude_academy_train": bool(self.exclude_academy_teams_train),
+            "exclude_academy_live": bool(self.exclude_academy_teams_live),
         }
         logger.info(
             f"[FEATURES] {len(features_list)} amostras extraidas de {len(rows)} partidas "
             f"(descartadas={skipped}, sinteticos={skipped_synthetic}, academy={skipped_academy}, "
             f"invalid_label={skipped_invalid_label}, low_data={skipped_low_data}, "
+            f"incl_sinteticos={included_synthetic}, incl_academy={included_academy}, "
             f"classes_t1={class_t1}, classes_t2={class_t2}, "
             f"min_recent_train={self.train_min_recent_matches}, "
             f"exclude_synth_train={self.exclude_synthetic_teams_train}, "
-            f"exclude_synth_live={self.exclude_synthetic_teams_live})"
+            f"exclude_synth_live={self.exclude_synthetic_teams_live}, "
+            f"exclude_academy_train={self.exclude_academy_teams_train}, "
+            f"exclude_academy_live={self.exclude_academy_teams_live})"
         )
+        if include_dates and include_quality:
+            return features_list, labels, match_dates, sample_quality
         if include_dates:
             return features_list, labels, match_dates
+        if include_quality:
+            return features_list, labels, sample_quality
         return features_list, labels
 
 
