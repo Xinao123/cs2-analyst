@@ -176,14 +176,17 @@ class OddsPapiSync:
 
             quotes = _extract_bookmaker_quotes(odds_payload, fixture)
             if not quotes:
-                report["reasons"]["payload_invalido"] += 1
-                if payload_invalid_logged < 3:
-                    logger.info(
-                        "[ODDS][oddspapi] payload sem quotes fixture=%s shape=%s",
-                        fixture_id,
-                        _payload_shape_summary(odds_payload),
-                    )
-                    payload_invalid_logged += 1
+                if _payload_has_any_price(odds_payload):
+                    report["reasons"]["payload_invalido"] += 1
+                    if payload_invalid_logged < 3:
+                        logger.info(
+                            "[ODDS][oddspapi] payload sem quotes fixture=%s shape=%s",
+                            fixture_id,
+                            _payload_shape_summary(odds_payload),
+                        )
+                        payload_invalid_logged += 1
+                else:
+                    report["reasons"]["sem_odds"] += 1
                 continue
 
             best = self._select_best_h2h_lines(quotes)
@@ -1318,6 +1321,40 @@ def _payload_has_no_odds(payload) -> bool:
         if bookmaker_odds is None and "fixtureId" in payload and "participant1Id" in payload:
             return True
     return False
+
+
+def _payload_has_any_price(payload) -> bool:
+    def _walk(node, depth: int) -> bool:
+        if depth > 12:
+            return False
+
+        if isinstance(node, dict):
+            for key, value in node.items():
+                key_l = _safe_str(key).lower()
+                if key_l in {
+                    "price",
+                    "odds",
+                    "decimalodds",
+                    "homeodds",
+                    "awayodds",
+                    "odd",
+                    "value",
+                }:
+                    if _safe_float(value) > 1.0:
+                        return True
+                if _walk(value, depth + 1):
+                    return True
+            return False
+
+        if isinstance(node, list):
+            for item in node:
+                if _walk(item, depth + 1):
+                    return True
+            return False
+
+        return False
+
+    return _walk(payload, 0)
 
 
 def _parse_datetime(value) -> datetime | None:

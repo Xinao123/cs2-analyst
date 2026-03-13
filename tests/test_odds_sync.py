@@ -12,6 +12,7 @@ from scraper.odds import (
     _extract_bookmaker_quotes,
     _index_local_matches,
     _normalize_fixture_payload,
+    _payload_has_any_price,
     _payload_has_no_odds,
     _score_sport_name,
 )
@@ -201,6 +202,34 @@ class OddsSyncTests(unittest.TestCase):
             "hasOdds": False,
         }
         self.assertTrue(_payload_has_no_odds(payload))
+
+    def test_payload_has_any_price_detects_nested_prices(self):
+        payload = {
+            "bookmakerOdds": {
+                "vave": {
+                    "markets": {
+                        "171": {
+                            "outcomes": {
+                                "171": {"players": {"0": {"price": 2.35}}},
+                                "172": {"players": {"0": {"price": 1.53}}},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.assertTrue(_payload_has_any_price(payload))
+
+    def test_payload_has_any_price_false_when_no_numeric_prices(self):
+        payload = {
+            "fixtureId": "id123",
+            "participant1Id": 1,
+            "participant2Id": 2,
+            "bookmakerOdds": {
+                "bookA": {"markets": {"171": {"outcomes": {"171": {"players": {}}}}}},
+            },
+        }
+        self.assertFalse(_payload_has_any_price(payload))
 
     def test_sync_persists_latest_and_snapshots_idempotently(self):
         os.environ[self.token_env] = "test-token"
