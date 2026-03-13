@@ -31,6 +31,7 @@ import yaml
 
 from db.models import Database
 from scraper.hltv import HLTVScraper
+from scraper.odds import OddsPapiSync
 from analysis.features import FeatureExtractor
 from analysis.predictor import Predictor
 from analysis.value import ValueDetector
@@ -106,6 +107,8 @@ async def analyze_upcoming(
     skipped_no_prediction = 0
     top_bets_count = max(1, int(config.get("model", {}).get("top_bets_count", 5)))
     candidates: list[dict] = []
+    value_candidates: list[dict] = []
+    candidates_with_odds = 0
 
     for match in upcoming:
         features = features_ext.extract(match)
@@ -137,52 +140,95 @@ async def analyze_upcoming(
                 "odds_team2": match.get("odds_team2"),
             }
 
+        has_valid_odds = (
+            _safe_float(match.get("odds_team1")) > 1.0
+            and _safe_float(match.get("odds_team2")) > 1.0
+        )
+        if has_valid_odds:
+            candidates_with_odds += 1
+
+        best_vb = _best_value_bet(analysis)
         predicted_winner_id = (
             match["team1_id"] if prediction["predicted_winner"] == 1
             else match["team2_id"]
         )
+        suggested_bet = ""
+        suggested_stake = 0.0
+        value_pct = 0.0
+        if best_vb:
+            suggested_bet = (
+                match.get("team1_name", "")
+                if best_vb.get("side") == "team1"
+                else match.get("team2_name", "")
+            )
+            suggested_stake = float(best_vb.get("suggested_stake", 0.0))
+            value_pct = float(best_vb.get("value_pct", 0.0))
+
         db.save_prediction(
             match_id=match["id"],
             predicted_winner_id=predicted_winner_id,
             team1_win_prob=prediction["team1_win_prob"],
             team2_win_prob=prediction["team2_win_prob"],
+            value_pct=value_pct,
+            suggested_bet=suggested_bet,
+            suggested_stake=suggested_stake,
+            odds_team1=match.get("odds_team1"),
+            odds_team2=match.get("odds_team2"),
         )
 
-        score = _score_bet_candidate(prediction, analysis, features)
+        score = _score_bet_candidate(prediction, analysis)
+        best_odd = float(best_vb.get("odds", 0.0)) if best_vb else 0.0
         candidates.append(
             {
                 "match": match,
                 "prediction": prediction,
                 "analysis": analysis,
                 "score": score,
+                "best_vb": best_vb or {},
+                "best_odd": best_odd,
             }
         )
 
         if analysis.get("has_value"):
             value_count += 1
+            value_candidates.append(candidates[-1])
 
         logger.info(
-            "  %s (%s%%) vs %s (%s%%) | confianca=%s%% | score=%.2f",
+            "  %s (%s%%) vs %s (%s%%) | confianca=%s%% | has_value=%s | score=%.2f",
             match.get("team1_name", "?"),
             round(prediction["team1_win_prob"]),
             match.get("team2_name", "?"),
             round(prediction["team2_win_prob"]),
             round(prediction["confidence"]),
+            "sim" if analysis.get("has_value") else "nao",
             score,
         )
 
-    candidates.sort(key=lambda item: item["score"], reverse=True)
-    top_picks = candidates[:top_bets_count]
+    value_candidates.sort(
+        key=lambda item: (float(item.get("score", 0.0)), float(item.get("best_odd", 0.0))),
+        reverse=True,
+    )
+    top_picks = value_candidates[:top_bets_count]
+    notifier.top_picks_alert(
+        top_picks,
+        total_candidates=len(candidates),
+        requested_top=top_bets_count,
+        candidates_with_odds=candidates_with_odds,
+    )
     if top_picks:
-        notifier.top_picks_alert(top_picks, len(candidates), top_bets_count)
         logger.info(
-            "[ANALYSIS] Top %s enviados (%s candidatos, %s com value no top)",
+            "[ANALYSIS] Top %s enviados (%s candidatos totais, %s com odds, %s value)",
             len(top_picks),
             len(candidates),
-            sum(1 for item in top_picks if item["analysis"].get("has_value")),
+            candidates_with_odds,
+            len(value_candidates),
         )
     else:
-        logger.info("[ANALYSIS] Nenhum candidato para top picks")
+        logger.info(
+            "[ANALYSIS] Sem oportunidades de value no ciclo (%s candidatos, %s com odds)",
+            len(candidates),
+            candidates_with_odds,
+        )
 
     logger.info(
         "[ANALYSIS] %s partidas analisadas, %s value bets (sem_features=%s, sem_pred=%s)",
@@ -194,25 +240,39 @@ async def analyze_upcoming(
     return value_count
 
 
-def _score_bet_candidate(prediction: dict, analysis: dict, features: dict) -> float:
-    """Score de priorizacao para top picks."""
-    confidence = float(prediction.get("confidence", 0.0))
-    separation = abs(float(prediction.get("team1_win_prob", 50.0)) - float(prediction.get("team2_win_prob", 50.0)))
-    coverage = min(float(features.get("team1_matches_played", 0)), float(features.get("team2_matches_played", 0)))
-    h2h = float(features.get("h2h_matches", 0))
+def _score_bet_candidate(prediction: dict, analysis: dict) -> float:
+    """Score fixo para ranking value-only."""
+    best_vb = _best_value_bet(analysis)
+    if not best_vb:
+        return 0.0
 
-    score = (confidence * 1.2) + (separation * 0.6)
-    score += min(coverage, 20.0) * 0.6
-    score += min(h2h, 10.0) * 0.4
-
-    value_bets = analysis.get("value_bets", [])
-    if value_bets:
-        best_vb = max(value_bets, key=lambda vb: float(vb.get("value_pct", 0.0)))
-        value_pct = float(best_vb.get("value_pct", 0.0))
-        expected_value = max(0.0, float(best_vb.get("expected_value", 0.0)))
-        score += (value_pct * 2.0) + (expected_value / 5.0)
-
+    value_pct = max(0.0, float(best_vb.get("value_pct", 0.0)))
+    expected_value = max(0.0, float(best_vb.get("expected_value", 0.0)))
+    confidence = max(0.0, float(prediction.get("confidence", 0.0)))
+    score = (value_pct * 2.0) + (expected_value * 0.5) + (confidence * 0.3)
     return round(score, 4)
+
+
+def _best_value_bet(analysis: dict | None) -> dict | None:
+    if not analysis:
+        return None
+    value_bets = analysis.get("value_bets", [])
+    if not value_bets:
+        return None
+    return max(
+        value_bets,
+        key=lambda vb: (
+            float(vb.get("value_pct", 0.0)),
+            float(vb.get("expected_value", 0.0)),
+        ),
+    )
+
+
+def _safe_float(value) -> float:
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 async def update_data(db: Database, config: dict):
@@ -257,9 +317,15 @@ async def run(config: dict, once: bool = False):
     predictor = Predictor(config)
     value_detector = ValueDetector(config)
     notifier = Notifier(config)
+    odds_sync = OddsPapiSync(db, config)
 
     interval = config.get("scheduler", {}).get("scan_interval", 60) * 60  # em segundos
     daily_hour = config.get("scheduler", {}).get("daily_update_hour", 6)
+    next_odds_sync_at = (
+        time.time() + odds_sync.refresh_seconds
+        if odds_sync.enabled
+        else float("inf")
+    )
 
     # Banner
     logger.info("=" * 50)
@@ -299,6 +365,11 @@ async def run(config: dict, once: bool = False):
             await scraper.scrape_results()
             await scraper.close()
 
+            # Atualiza odds reais antes da analise (uma vez no --once e a cada ciclo normal)
+            if odds_sync.enabled:
+                next_odds_sync_at = time.time() + odds_sync.refresh_seconds
+                await asyncio.to_thread(odds_sync.sync_upcoming_odds)
+
             # Analisa partidas futuras
             await analyze_upcoming(db, features_ext, predictor, value_detector, notifier, config)
 
@@ -315,7 +386,10 @@ async def run(config: dict, once: bool = False):
         for _ in range(interval):
             if not _running:
                 break
-            time.sleep(1)
+            if odds_sync.enabled and time.time() >= next_odds_sync_at:
+                next_odds_sync_at = time.time() + odds_sync.refresh_seconds
+                await asyncio.to_thread(odds_sync.sync_upcoming_odds)
+            await asyncio.sleep(1)
 
     logger.info("ðŸ‘‹ Bot encerrado.")
 

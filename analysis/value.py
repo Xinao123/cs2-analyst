@@ -52,6 +52,9 @@ class ValueDetector:
         t1_prob = prediction["team1_win_prob"] / 100
         t2_prob = prediction["team2_win_prob"] / 100
         confidence = prediction["confidence"]
+        bookmaker_team1 = _safe_str((match or {}).get("bookmaker_team1"))
+        bookmaker_team2 = _safe_str((match or {}).get("bookmaker_team2"))
+        odds_updated_at = _safe_str((match or {}).get("odds_updated_at"))
 
         # Filtro de confiança mínima
         if confidence < self.min_confidence:
@@ -66,6 +69,9 @@ class ValueDetector:
             "value_bets": [],
             "odds_team1": odds_team1,
             "odds_team2": odds_team2,
+            "bookmaker_team1": bookmaker_team1,
+            "bookmaker_team2": bookmaker_team2,
+            "odds_updated_at": odds_updated_at,
         }
 
         # Sem odds = só mostra predição, sem value bet
@@ -83,12 +89,14 @@ class ValueDetector:
                 result["value_bets"].append({
                     "side": "team1",
                     "odds": odds_team1,
+                    "bookmaker": bookmaker_team1,
                     "model_prob": round(t1_prob * 100, 1),
                     "implied_prob": round(implied_prob_t1 * 100, 1),
                     "value_pct": round(value_pct_t1, 1),
                     "edge": round(edge_t1 * 100, 2),
                     "suggested_stake": round(stake, 2),
                     "expected_value": round(_expected_value(t1_prob, odds_team1, stake), 2),
+                    "odds_updated_at": odds_updated_at,
                 })
 
         # Analisa value pro team2
@@ -102,12 +110,14 @@ class ValueDetector:
                 result["value_bets"].append({
                     "side": "team2",
                     "odds": odds_team2,
+                    "bookmaker": bookmaker_team2,
                     "model_prob": round(t2_prob * 100, 1),
                     "implied_prob": round(implied_prob_t2 * 100, 1),
                     "value_pct": round(value_pct_t2, 1),
                     "edge": round(edge_t2 * 100, 2),
                     "suggested_stake": round(stake, 2),
                     "expected_value": round(_expected_value(t2_prob, odds_team2, stake), 2),
+                    "odds_updated_at": odds_updated_at,
                 })
 
         result["has_value"] = len(result["value_bets"]) > 0
@@ -161,14 +171,18 @@ class ValueDetector:
 
         o1 = analysis.get("odds_team1")
         o2 = analysis.get("odds_team2")
+        b1 = _safe_str(analysis.get("bookmaker_team1"))
+        b2 = _safe_str(analysis.get("bookmaker_team2"))
         lines.extend(
             [
                 "",
                 "📉 Odds de mercado:",
-                f"   {t1_name}: {self._format_odds(o1)}",
-                f"   {t2_name}: {self._format_odds(o2)}",
+                f"   {t1_name}: {self._format_odds(o1)} {_format_bookmaker(b1)}",
+                f"   {t2_name}: {self._format_odds(o2)} {_format_bookmaker(b2)}",
             ]
         )
+        if analysis.get("odds_updated_at"):
+            lines.append(f"   Atualizado: {self._format_match_datetime(analysis['odds_updated_at'])}")
 
         if analysis["value_bets"]:
             lines.append("")
@@ -177,7 +191,7 @@ class ValueDetector:
                 side_name = t1_name if vb["side"] == "team1" else t2_name
                 lines.extend([
                     f"",
-                    f"   ✅ {side_name} @ {vb['odds']:.2f}",
+                    f"   ✅ {side_name} @ {vb['odds']:.2f} {_format_bookmaker(vb.get('bookmaker'))}",
                     f"   Modelo: {vb['model_prob']:.1f}% vs Casa: {vb['implied_prob']:.1f}%",
                     f"   Value: +{vb['value_pct']:.1f}%",
                     f"   Stake sugerida: R$ {vb['suggested_stake']:.2f}",
@@ -237,3 +251,16 @@ def _expected_value(prob: float, odds: float, stake: float) -> float:
     win_amount = stake * (odds - 1)
     ev = (prob * win_amount) - ((1 - prob) * stake)
     return ev
+
+
+def _safe_str(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _format_bookmaker(value) -> str:
+    text = _safe_str(value)
+    if not text:
+        return ""
+    return f"({text})"

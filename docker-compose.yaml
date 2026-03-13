@@ -8,3 +8,4 @@ services:
     environment:
       - TZ=America/Sao_Paulo
       - PANDASCORE_API_TOKEN=${PANDASCORE_API_TOKEN:-}
+      - ODDSPAPI_API_KEY=${ODDSPAPI_API_KEY:-}

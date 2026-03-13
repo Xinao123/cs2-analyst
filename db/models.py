@@ -122,11 +122,41 @@ CREATE TABLE IF NOT EXISTS predictions (
     FOREIGN KEY (match_id) REFERENCES matches(id)
 );
 
+CREATE TABLE IF NOT EXISTS match_odds_latest (
+    match_id INTEGER PRIMARY KEY,
+    provider TEXT NOT NULL,
+    fixture_id TEXT,
+    market_key TEXT DEFAULT 'h2h',
+    odds_team1 REAL,
+    odds_team2 REAL,
+    bookmaker_team1 TEXT,
+    bookmaker_team2 TEXT,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (match_id) REFERENCES matches(id)
+);
+
+CREATE TABLE IF NOT EXISTS odds_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    fixture_id TEXT,
+    bookmaker TEXT NOT NULL,
+    market_key TEXT DEFAULT 'h2h',
+    side TEXT NOT NULL,
+    odds REAL NOT NULL,
+    odds_changed_at TEXT,
+    collected_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    fingerprint TEXT UNIQUE,
+    FOREIGN KEY (match_id) REFERENCES matches(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(date);
 CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
 CREATE INDEX IF NOT EXISTS idx_matches_teams ON matches(team1_id, team2_id);
 CREATE INDEX IF NOT EXISTS idx_players_team ON players(team_id);
 CREATE INDEX IF NOT EXISTS idx_match_maps_match ON match_maps(match_id);
+CREATE INDEX IF NOT EXISTS idx_odds_latest_updated ON match_odds_latest(updated_at);
+CREATE INDEX IF NOT EXISTS idx_odds_snapshots_match ON odds_snapshots(match_id, collected_at);
 """
 
 
@@ -275,9 +305,13 @@ class Database:
             rows = conn.execute(
                 """SELECT m.*, t1.name as team1_name, t2.name as team2_name,
                      t1.ranking as team1_ranking, t2.ranking as team2_ranking
+                     ,mo.odds_team1, mo.odds_team2
+                     ,mo.bookmaker_team1, mo.bookmaker_team2
+                     ,mo.updated_at as odds_updated_at
                    FROM matches m
                    JOIN teams t1 ON m.team1_id = t1.id
                    JOIN teams t2 ON m.team2_id = t2.id
+                   LEFT JOIN match_odds_latest mo ON mo.match_id = m.id
                    WHERE m.status = 'upcoming'
                    ORDER BY m.date ASC"""
             ).fetchall()
@@ -341,6 +375,60 @@ class Database:
                 "SELECT * FROM team_map_stats WHERE team_id=?", (team_id,)
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ============================================================
+    # Odds
+    # ============================================================
+
+    def upsert_match_odds_latest(self, match_id: int, **kwargs):
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO match_odds_latest
+                     (match_id, provider, fixture_id, market_key, odds_team1, odds_team2,
+                      bookmaker_team1, bookmaker_team2, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(match_id) DO UPDATE SET
+                     provider=excluded.provider,
+                     fixture_id=excluded.fixture_id,
+                     market_key=excluded.market_key,
+                     odds_team1=excluded.odds_team1,
+                     odds_team2=excluded.odds_team2,
+                     bookmaker_team1=excluded.bookmaker_team1,
+                     bookmaker_team2=excluded.bookmaker_team2,
+                     updated_at=excluded.updated_at""",
+                (
+                    match_id,
+                    kwargs.get("provider", "oddspapi"),
+                    kwargs.get("fixture_id", ""),
+                    kwargs.get("market_key", "h2h"),
+                    kwargs.get("odds_team1"),
+                    kwargs.get("odds_team2"),
+                    kwargs.get("bookmaker_team1", ""),
+                    kwargs.get("bookmaker_team2", ""),
+                    kwargs.get("updated_at", datetime.now().isoformat()),
+                ),
+            )
+
+    def insert_odds_snapshot(self, match_id: int, **kwargs):
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO odds_snapshots
+                    (match_id, provider, fixture_id, bookmaker, market_key, side, odds,
+                     odds_changed_at, collected_at, fingerprint)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    match_id,
+                    kwargs.get("provider", "oddspapi"),
+                    kwargs.get("fixture_id", ""),
+                    kwargs.get("bookmaker", ""),
+                    kwargs.get("market_key", "h2h"),
+                    kwargs.get("side", ""),
+                    kwargs.get("odds"),
+                    kwargs.get("odds_changed_at"),
+                    kwargs.get("collected_at", datetime.now().isoformat()),
+                    kwargs.get("fingerprint", ""),
+                ),
+            )
 
     # ============================================================
     # Predictions

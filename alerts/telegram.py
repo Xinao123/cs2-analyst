@@ -64,17 +64,34 @@ class Notifier:
             f"{_html_escape(report)}"
         )
 
-    def top_picks_alert(self, picks: list[dict], total_candidates: int, requested_top: int):
+    def top_picks_alert(
+        self,
+        picks: list[dict],
+        total_candidates: int,
+        requested_top: int,
+        candidates_with_odds: int = 0,
+    ):
         """Envia ranking consolidado das melhores oportunidades."""
+        now = datetime.now().strftime("%d/%m %H:%M")
         if not picks:
+            self._send(
+                "\n".join(
+                    [
+                        f"🏆 <b>Top {requested_top} apostas do ciclo</b>",
+                        f"{'━' * 30}",
+                        f"📅 {now}",
+                        f"🔎 Candidatas: {total_candidates} (com odds: {candidates_with_odds})",
+                        "❌ Sem oportunidades de value neste ciclo",
+                    ]
+                )
+            )
             return
 
-        now = datetime.now().strftime("%d/%m %H:%M")
         lines = [
             f"🏆 <b>Top {len(picks)} apostas do ciclo</b>",
             f"{'━' * 30}",
             f"📅 {now}",
-            f"🔎 Candidatas: {total_candidates} (top solicitado: {requested_top})",
+            f"🔎 Candidatas: {total_candidates} (com odds: {candidates_with_odds}, top solicitado: {requested_top})",
             "",
         ]
 
@@ -93,11 +110,16 @@ class Notifier:
             conf = float(pred.get("confidence", 50.0))
             side = t1 if pred.get("predicted_winner") == 1 else t2
 
-            value_tag = ""
-            value_bets = analysis.get("value_bets", [])
-            if value_bets:
-                best_vb = max(value_bets, key=lambda vb: float(vb.get("value_pct", 0.0)))
-                value_tag = f" | VALUE +{float(best_vb.get('value_pct', 0.0)):.1f}%"
+            best_vb = item.get("best_vb") or {}
+            if not best_vb:
+                value_bets = analysis.get("value_bets", [])
+                if value_bets:
+                    best_vb = max(value_bets, key=lambda vb: float(vb.get("value_pct", 0.0)))
+
+            odd = float(best_vb.get("odds", 0.0))
+            value_pct = float(best_vb.get("value_pct", 0.0))
+            ev = float(best_vb.get("expected_value", 0.0))
+            bookmaker = _safe_text(best_vb.get("bookmaker", "N/D"))
 
             lines.extend(
                 [
@@ -105,7 +127,9 @@ class Notifier:
                     f"   🗓 {_html_escape(when)}",
                     f"   🏆 {_html_escape(event) if event else '-'}",
                     f"   🎯 Pick: {_html_escape(side)} ({p1:.1f}% x {p2:.1f}%, conf {conf:.1f}%)",
-                    f"   📌 Score: {score:.2f}{_html_escape(value_tag)}",
+                    f"   💵 Odd: {odd:.2f} ({_html_escape(bookmaker)})",
+                    f"   📈 Value: +{value_pct:.1f}% | EV: R$ {ev:.2f}",
+                    f"   📌 Score: {score:.2f}",
                     "",
                 ]
             )
