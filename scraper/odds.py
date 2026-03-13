@@ -655,7 +655,9 @@ def _extract_bookmaker_quotes(payload: dict | list | None, fixture: dict) -> lis
                 continue
 
             market_key = _market_key(market, block)
-            if not _is_h2h_market(market_key, market):
+            if not _is_h2h_market(market_key, market) and not _market_has_candidate_h2h_outcomes(
+                market, fixture
+            ):
                 continue
 
             for outcome in _extract_outcomes(market):
@@ -788,6 +790,58 @@ def _extract_outcomes(market: dict) -> list[dict]:
     return outcomes
 
 
+def _market_has_candidate_h2h_outcomes(market: dict, fixture: dict) -> bool:
+    outcomes = _extract_outcomes(market)
+    if not outcomes:
+        return False
+
+    valid = 0
+    has_home = False
+    has_away = False
+
+    for outcome in outcomes:
+        price = _extract_outcome_price(outcome)
+        if price <= 1.0:
+            continue
+        valid += 1
+
+        side = _resolve_outcome_side(outcome, fixture)
+        if side == "home":
+            has_home = True
+        elif side == "away":
+            has_away = True
+        elif side == "draw":
+            continue
+
+    if valid < 2:
+        return False
+    if has_home and has_away:
+        return True
+
+    tokens = set()
+    for outcome in outcomes:
+        tokens.add(_normalize_outcome_token(outcome.get("_outcome_key", "")))
+        tokens.add(
+            _normalize_outcome_token(
+                outcome.get(
+                    "bookmakerOutcomeId",
+                    outcome.get(
+                        "outcome",
+                        outcome.get("outcomeId", ""),
+                    ),
+                )
+            )
+        )
+
+    has_home_token = any(_is_home_outcome_token(token) for token in tokens)
+    has_away_token = any(_is_away_outcome_token(token) for token in tokens)
+    if has_home_token and has_away_token:
+        return True
+
+    # Fallback: h2h often arrives as exactly two priced outcomes without explicit labels.
+    return valid == 2 and len(outcomes) == 2
+
+
 def _extract_bookmaker_name(block: dict) -> str:
     direct = _safe_str(
         block.get(
@@ -839,11 +893,23 @@ def _resolve_outcome_side(outcome: dict, fixture: dict) -> str:
         )
     )
 
-    if token in {"home", "team1", "1", "101"} or outcome_name in {"home", "team1", "1", "101"}:
+    if (
+        _is_home_outcome_token(token)
+        or _is_home_outcome_token(outcome_name)
+        or _is_home_outcome_token(outcome_key)
+    ):
         return "home"
-    if token in {"away", "team2", "2", "103"} or outcome_name in {"away", "team2", "2", "103"}:
+    if (
+        _is_away_outcome_token(token)
+        or _is_away_outcome_token(outcome_name)
+        or _is_away_outcome_token(outcome_key)
+    ):
         return "away"
-    if token in {"draw", "x", "102"} or outcome_name in {"draw", "x", "102"}:
+    if (
+        _is_draw_outcome_token(token)
+        or _is_draw_outcome_token(outcome_name)
+        or _is_draw_outcome_token(outcome_key)
+    ):
         return "draw"
 
     home_norm = _normalize_team_name(fixture.get("home_name", ""))
@@ -883,14 +949,24 @@ def _resolve_outcome_side(outcome: dict, fixture: dict) -> str:
             player_name = _normalize_team_name(
                 player.get("name", player.get("outcomeName", player.get("label", "")))
             )
-            player_token = _normalize_team_name(player.get("bookmakerOutcomeId", ""))
+            player_token = _normalize_outcome_token(
+                player.get("bookmakerOutcomeId", player.get("outcomeId", ""))
+            )
             player_id = _normalize_team_name(
                 player.get("id", player.get("participantId", player.get("teamId", "")))
             )
-            player_key_norm = _normalize_team_name(player_key)
-            if home_norm and (player_name == home_norm or player_token in {"home", "team1", "101"}):
+            player_key_norm = _normalize_outcome_token(player_key)
+            if home_norm and (
+                player_name == home_norm
+                or _is_home_outcome_token(player_token)
+                or _is_home_outcome_token(player_key_norm)
+            ):
                 return "home"
-            if away_norm and (player_name == away_norm or player_token in {"away", "team2", "103"}):
+            if away_norm and (
+                player_name == away_norm
+                or _is_away_outcome_token(player_token)
+                or _is_away_outcome_token(player_key_norm)
+            ):
                 return "away"
             if home_id_norm and (player_token == home_id_norm or player_id == home_id_norm or player_key_norm == home_id_norm):
                 return "home"
@@ -960,6 +1036,40 @@ def _is_h2h_market(market_key: str, market: dict) -> bool:
         return True
 
     return False
+
+
+def _normalize_outcome_token(value) -> str:
+    return _normalize_team_name(value)
+
+
+def _is_home_outcome_token(token: str) -> bool:
+    return token in {
+        "home",
+        "team1",
+        "participant1",
+        "p1",
+        "1",
+        "101",
+        "171",
+        "4",
+    }
+
+
+def _is_away_outcome_token(token: str) -> bool:
+    return token in {
+        "away",
+        "team2",
+        "participant2",
+        "p2",
+        "2",
+        "103",
+        "172",
+        "5",
+    }
+
+
+def _is_draw_outcome_token(token: str) -> bool:
+    return token in {"draw", "x", "102", "3", "6"}
 
 
 def _normalize_fixture_payload(item: dict) -> dict | None:

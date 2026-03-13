@@ -153,6 +153,38 @@ class OddsSyncTests(unittest.TestCase):
         self.assertEqual(2, len(quotes))
         self.assertEqual({"home", "away"}, {q["side"] for q in quotes})
 
+    def test_extract_quotes_from_oddspapi_numeric_outcome_keys(self):
+        fixture = {
+            "fixture_id": "9993",
+            "home_name": "Wopa eSport",
+            "away_name": "Rune Eaters eSports",
+            "home_id": "1132689",
+            "away_id": "1332262",
+            "start_dt": datetime.now(timezone.utc) + timedelta(hours=2),
+            "event_name": "CCT",
+        }
+        payload = {
+            "fixtureId": "id1704353369835056",
+            "participant1Id": 1132689,
+            "participant2Id": 1332262,
+            "bookmakerOdds": {
+                "vave": {
+                    "bookmakerIsActive": True,
+                    "markets": {
+                        "171": {
+                            "outcomes": {
+                                "171": {"players": {"0": {"bookmakerOutcomeId": "4", "price": 2.35}}},
+                                "172": {"players": {"0": {"bookmakerOutcomeId": "5", "price": 1.53}}},
+                            }
+                        }
+                    },
+                }
+            },
+        }
+        quotes = _extract_bookmaker_quotes(payload, fixture)
+        self.assertEqual(2, len(quotes))
+        self.assertEqual({"home", "away"}, {q["side"] for q in quotes})
+
     def test_sport_score_prefers_counter_strike(self):
         cs_score = _score_sport_name("Counter-Strike 2 Esports")
         val_score = _score_sport_name("Valorant Esports")
