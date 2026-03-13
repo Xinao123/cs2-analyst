@@ -7,3 +7,4 @@ services:
       - ./data:/app/data
     environment:
       - TZ=America/Sao_Paulo
+      - PANDASCORE_API_TOKEN=${PANDASCORE_API_TOKEN:-}

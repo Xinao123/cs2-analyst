@@ -7,9 +7,11 @@ Respeita rate limits do HLTV com delays configuraveis.
 
 import asyncio
 import logging
+import os
 import re
+import time
 import zlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -17,6 +19,18 @@ import requests
 from db.models import Database
 
 logger = logging.getLogger(__name__)
+
+SYNTHETIC_MATCH_ID_BASE = 9_000_000_000
+SYNTHETIC_TEAM_ID_BASE = 8_000_000_000
+UPCOMING_SKIP_REASON_KEYS = (
+    "sem_time",
+    "sem_data",
+    "fora_janela",
+    "duplicada",
+    "team_unresolved",
+    "cloudflare",
+    "payload_invalido",
+)
 
 
 class HLTVScraper:
@@ -31,8 +45,33 @@ class HLTVScraper:
         self.proxy_path = scraper_cfg.get("proxy_path", "")
         self.min_rating = _safe_int(scraper_cfg.get("min_rating", 0))
         self.upcoming_days = max(1, _safe_int(scraper_cfg.get("upcoming_days", 2)))
+        self.upcoming_days_ahead = max(
+            1,
+            _safe_int(scraper_cfg.get("upcoming_days_ahead", self.upcoming_days)),
+        )
+        self.upcoming_provider = (
+            _safe_str(scraper_cfg.get("upcoming_provider", "pandascore")).lower() or "pandascore"
+        )
+        self.upcoming_fallback = (
+            _safe_str(scraper_cfg.get("upcoming_fallback", "hltv")).lower() or "hltv"
+        )
+        self.upcoming_max_pages = max(1, _safe_int(scraper_cfg.get("upcoming_max_pages", 5)))
+        self.upcoming_retry_count = max(0, _safe_int(scraper_cfg.get("upcoming_retry_count", 3)))
+        self.upcoming_retry_backoff_sec = max(
+            1,
+            _safe_int(scraper_cfg.get("upcoming_retry_backoff_sec", 2)),
+        )
         self.results_days = max(1, _safe_int(scraper_cfg.get("results_days", 2)))
         self.results_max = max(30, _safe_int(scraper_cfg.get("results_max", 200)))
+        self.pandascore_base_url = (
+            _safe_str(scraper_cfg.get("pandascore_base_url", "https://api.pandascore.co"))
+            .rstrip("/")
+        )
+        self.pandascore_token_env = (
+            _safe_str(scraper_cfg.get("pandascore_token_env", "PANDASCORE_API_TOKEN"))
+            or "PANDASCORE_API_TOKEN"
+        )
+        self.pandascore_timeout_sec = max(5, _safe_int(scraper_cfg.get("pandascore_timeout_sec", 20)))
         self.user_agent = scraper_cfg.get(
             "user_agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -42,6 +81,7 @@ class HLTVScraper:
         self.cookie = scraper_cfg.get("cookie", "")
         extra_headers = scraper_cfg.get("extra_headers", {})
         self.extra_headers = extra_headers if isinstance(extra_headers, dict) else {}
+        self._pandascore_token = _safe_str(os.getenv(self.pandascore_token_env))
         self._hltv = None
 
     async def _get_client(self):
@@ -194,12 +234,186 @@ class HLTVScraper:
     # ============================================================
 
     async def scrape_upcoming_matches(self):
-        """Busca partidas futuras do HLTV."""
+        """Busca partidas futuras com cadeia de providers (primario -> fallback)."""
+        providers = self._get_upcoming_provider_order()
+        logger.info("[UPCOMING] Buscando partidas futuras (ordem=%s)...", " -> ".join(providers))
+
+        last_report = self._new_upcoming_report()
+        for idx, provider in enumerate(providers):
+            if provider == "pandascore":
+                report = await self._scrape_upcoming_from_pandascore()
+            elif provider == "hltv":
+                report = await self._scrape_upcoming_from_hltv()
+            else:
+                report = self._new_upcoming_report()
+                report["error"] = f"provider_nao_suportado:{provider}"
+
+            self._log_upcoming_report(provider, report)
+            if report["saved"] > 0:
+                return report["saved"]
+
+            last_report = report
+            if idx < len(providers) - 1:
+                logger.info(
+                    "[UPCOMING] Provider %s sem partidas salvas, tentando fallback...",
+                    provider,
+                )
+
+        if last_report.get("error"):
+            logger.warning("[UPCOMING] Nenhuma partida futura salva. Ultimo erro=%s", last_report["error"])
+        else:
+            logger.warning("[UPCOMING] Nenhuma partida futura salva por nenhum provider")
+        return 0
+
+    def _new_upcoming_report(self) -> dict:
+        return {
+            "returned": 0,
+            "saved": 0,
+            "skipped": 0,
+            "reasons": {key: 0 for key in UPCOMING_SKIP_REASON_KEYS},
+            "error": "",
+        }
+
+    def _get_upcoming_provider_order(self) -> list[str]:
+        providers = []
+        supported = {"pandascore", "hltv"}
+
+        for value in (self.upcoming_provider, self.upcoming_fallback):
+            provider = _safe_str(value).lower()
+            if not provider:
+                continue
+            if provider not in supported:
+                logger.warning("[UPCOMING] Provider desconhecido ignorado: %s", provider)
+                continue
+            if provider not in providers:
+                providers.append(provider)
+
+        if not providers:
+            providers = ["pandascore", "hltv"]
+
+        return providers
+
+    def _log_upcoming_report(self, provider: str, report: dict):
+        reasons = report.get("reasons", {})
+        returned = _safe_int(report.get("returned"))
+        saved = _safe_int(report.get("saved"))
+        skipped = _safe_int(report.get("skipped", max(returned - saved, 0)))
+
+        logger.info(
+            "[UPCOMING][%s] retornadas=%s salvas=%s descartadas=%s "
+            "(sem_time=%s, sem_data=%s, fora_janela=%s, duplicada=%s, "
+            "team_unresolved=%s, cloudflare=%s, payload_invalido=%s)",
+            provider,
+            returned,
+            saved,
+            skipped,
+            _safe_int(reasons.get("sem_time", 0)),
+            _safe_int(reasons.get("sem_data", 0)),
+            _safe_int(reasons.get("fora_janela", 0)),
+            _safe_int(reasons.get("duplicada", 0)),
+            _safe_int(reasons.get("team_unresolved", 0)),
+            _safe_int(reasons.get("cloudflare", 0)),
+            _safe_int(reasons.get("payload_invalido", 0)),
+        )
+        if report.get("error"):
+            logger.warning("[UPCOMING][%s] erro=%s", provider, report["error"])
+
+    async def _scrape_upcoming_from_pandascore(self) -> dict:
+        token = _safe_str(os.getenv(self.pandascore_token_env)) or self._pandascore_token
+        self._pandascore_token = token
+
+        report = self._new_upcoming_report()
+        if not token:
+            report["error"] = f"token_ausente:{self.pandascore_token_env}"
+            logger.warning(
+                "[UPCOMING][pandascore] Token ausente em %s, modo degradado para fallback.",
+                self.pandascore_token_env,
+            )
+            return report
+
+        all_matches = []
+        for page in range(1, self.upcoming_max_pages + 1):
+            page_matches, page_error = await asyncio.to_thread(
+                self._fetch_pandascore_upcoming_page,
+                page,
+                token,
+            )
+            if page_error:
+                report["error"] = page_error
+                break
+            if not page_matches:
+                break
+
+            all_matches.extend(page_matches)
+            if len(page_matches) < 100:
+                break
+
+        if not all_matches:
+            return report
+
+        return self._persist_upcoming_matches("pandascore", all_matches, report)
+
+    def _fetch_pandascore_upcoming_page(
+        self,
+        page: int,
+        token: str,
+    ) -> tuple[list[dict], str]:
+        url = f"{self.pandascore_base_url}/csgo/matches/upcoming"
+        headers = {
+            "accept": "application/json",
+            "authorization": f"Bearer {token}",
+            "user-agent": self.user_agent,
+        }
+        params = {
+            "page": page,
+            "per_page": 100,
+            "sort": "begin_at",
+        }
+
+        max_attempts = self.upcoming_retry_count + 1
+        for attempt in range(max_attempts):
+            try:
+                resp = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=self.pandascore_timeout_sec,
+                )
+            except requests.RequestException as exc:
+                if attempt >= max_attempts - 1:
+                    return [], f"request_error:{exc.__class__.__name__}"
+                time.sleep(self.upcoming_retry_backoff_sec * (attempt + 1))
+                continue
+
+            if resp.status_code in (429, 500, 502, 503, 504):
+                if attempt >= max_attempts - 1:
+                    return [], f"http_{resp.status_code}"
+                time.sleep(self.upcoming_retry_backoff_sec * (attempt + 1))
+                continue
+            if resp.status_code >= 400:
+                return [], f"http_{resp.status_code}"
+
+            try:
+                payload = resp.json()
+            except ValueError:
+                return [], "payload_invalido"
+
+            if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+                payload = payload["data"]
+            if not isinstance(payload, list):
+                return [], "payload_invalido"
+
+            return payload, ""
+
+        return [], "retry_exceeded"
+
+    async def _scrape_upcoming_from_hltv(self) -> dict:
+        """Busca partidas futuras no HLTV com fallback por eventos."""
+        report = self._new_upcoming_report()
         logger.info("[HLTV] Buscando partidas futuras...")
         hltv = await self._get_client()
 
         try:
-            # Compatibilidade com hltv-async-api 0.8.x.
             matches = await hltv.get_matches(
                 days=self.upcoming_days,
                 min_rating=self.min_rating,
@@ -217,86 +431,99 @@ class HLTVScraper:
                 logger.info("[HLTV] Upcoming ainda vazio, tentando fallback por eventos...")
                 matches = await self._collect_upcoming_from_events(hltv)
             if matches is None:
-                logger.warning("[HLTV] API retornou None para partidas futuras")
-                return 0
+                report["error"] = "api_none"
+                return report
             if not matches:
-                logger.warning("[HLTV] API retornou 0 partidas futuras")
                 cf_diag = self._diagnose_cloudflare_on_matches()
                 if cf_diag["blocked"]:
+                    report["reasons"]["cloudflare"] += 1
+                    report["error"] = f"cloudflare:{cf_diag['status']}"
                     logger.warning(
                         "[HLTV] Possivel bloqueio Cloudflare em /matches "
                         "(status=%s, challenge=%s). Configure proxy_path e/ou scraper.cookie (cf_clearance).",
                         cf_diag["status"],
                         cf_diag["challenge"],
                     )
-                return 0
+                return report
 
-            total = len(matches)
-            saved = 0
-            skips = {"sem_id": 0, "sem_score": 0, "payload_invalido": 0}
-
-            for match in matches:
-                try:
-                    normalized = self._normalize_upcoming_payload(match)
-                    if not normalized:
-                        skips["payload_invalido"] += 1
-                        continue
-
-                    team1_id = normalized["team1_id"]
-                    team2_id = normalized["team2_id"]
-                    team1_name = normalized["team1_name"]
-                    team2_name = normalized["team2_name"]
-
-                    team1_id = self._resolve_team_id(team1_id, team1_name)
-                    team2_id = self._resolve_team_id(team2_id, team2_name)
-
-                    if team1_id == 0 or team2_id == 0:
-                        skips["sem_id"] += 1
-                        continue
-
-                    if not team1_name:
-                        team = self.db.get_team(team1_id)
-                        team1_name = team.get("name", "TBD") if team else "TBD"
-                    if not team2_name:
-                        team = self.db.get_team(team2_id)
-                        team2_name = team.get("name", "TBD") if team else "TBD"
-
-                    if not self.db.get_team(team1_id):
-                        self.db.upsert_team(team1_id, team1_name)
-                    if not self.db.get_team(team2_id):
-                        self.db.upsert_team(team2_id, team2_name)
-
-                    self.db.upsert_match(
-                        hltv_id=normalized["match_id"],
-                        date=normalized["date"],
-                        event_name=normalized["event_name"],
-                        best_of=normalized["best_of"],
-                        team1_id=team1_id,
-                        team2_id=team2_id,
-                        status="upcoming",
-                    )
-                    saved += 1
-
-                except (KeyError, TypeError, ValueError) as e:
-                    skips["payload_invalido"] += 1
-                    logger.debug(f"[HLTV] Erro ao parsear partida: {e}")
-
-            discarded = total - saved
-            logger.info(
-                "[HLTV] Partidas futuras: retornadas=%s salvas=%s descartadas=%s "
-                "(sem_id=%s, sem_score=%s, payload_invalido=%s)",
-                total,
-                saved,
-                discarded,
-                skips["sem_id"],
-                skips["sem_score"],
-                skips["payload_invalido"],
-            )
-            return saved
+            return self._persist_upcoming_matches("hltv", matches, report)
 
         except Exception as e:
-            logger.error(f"[HLTV] Erro ao buscar partidas: {e}")
-            return 0
+            report["error"] = f"provider_error:{e}"
+            return report
+
+    def _persist_upcoming_matches(self, provider: str, matches: list[dict], report: dict | None = None) -> dict:
+        report = report or self._new_upcoming_report()
+        report["returned"] = len(matches)
+
+        reasons = report["reasons"]
+        saved = 0
+        seen_ids: set[int] = set()
+        for match in matches:
+            normalized = self._normalize_upcoming_payload_by_provider(provider, match)
+            if not normalized:
+                reasons["payload_invalido"] += 1
+                continue
+
+            match_id = _safe_int(normalized.get("match_id"))
+            if match_id == 0:
+                reasons["payload_invalido"] += 1
+                continue
+            if match_id in seen_ids:
+                reasons["duplicada"] += 1
+                continue
+            seen_ids.add(match_id)
+
+            match_date = _safe_str(normalized.get("date"))
+            if not match_date:
+                reasons["sem_data"] += 1
+                continue
+
+            parsed_date = _parse_datetime(match_date)
+            if parsed_date is None:
+                reasons["sem_data"] += 1
+                continue
+            if not self._is_within_upcoming_window(parsed_date):
+                reasons["fora_janela"] += 1
+                continue
+
+            team1_name = _safe_str(normalized.get("team1_name"))
+            team2_name = _safe_str(normalized.get("team2_name"))
+            if not team1_name or not team2_name:
+                reasons["sem_time"] += 1
+                continue
+
+            team1_id = self._resolve_team_id(
+                _safe_int(normalized.get("team1_id")),
+                team1_name,
+                provider=provider,
+            )
+            team2_id = self._resolve_team_id(
+                _safe_int(normalized.get("team2_id")),
+                team2_name,
+                provider=provider,
+            )
+            if team1_id == 0 or team2_id == 0 or team1_id == team2_id:
+                reasons["team_unresolved"] += 1
+                continue
+
+            self._ensure_team_exists(team1_id, team1_name)
+            self._ensure_team_exists(team2_id, team2_name)
+
+            self.db.upsert_match(
+                hltv_id=match_id,
+                date=match_date,
+                event_name=_safe_str(normalized.get("event_name")),
+                best_of=_parse_best_of(normalized.get("best_of", 1)),
+                team1_id=team1_id,
+                team2_id=team2_id,
+                status="upcoming",
+            )
+            saved += 1
+
+        report["saved"] = saved
+        report["skipped"] = max(report["returned"] - report["saved"], 0)
+        return report
 
     async def scrape_results(self, pages: int = 1):
         """Busca resultados recentes."""
@@ -413,6 +640,11 @@ class HLTVScraper:
             logger.error(f"[HLTV] Erro ao buscar resultados: {e}")
             return 0
 
+    def _normalize_upcoming_payload_by_provider(self, provider: str, match: dict) -> dict | None:
+        if provider == "pandascore":
+            return self._normalize_pandascore_upcoming_payload(match)
+        return self._normalize_upcoming_payload(match)
+
     def _normalize_upcoming_payload(self, match: dict) -> dict | None:
         if not isinstance(match, dict):
             return None
@@ -448,6 +680,41 @@ class HLTVScraper:
             "team2_id": team2_id,
             "team1_name": team1_name,
             "team2_name": team2_name,
+        }
+
+    def _normalize_pandascore_upcoming_payload(self, match: dict) -> dict | None:
+        if not isinstance(match, dict):
+            return None
+
+        provider_match_id = _safe_int(match.get("id"))
+        if provider_match_id <= 0:
+            return None
+
+        teams = _extract_pandascore_teams(match)
+        if len(teams) < 2:
+            return None
+
+        event_name = _safe_str(
+            match.get("tournament", {}).get("name")
+            or match.get("serie", {}).get("name")
+            or match.get("league", {}).get("name")
+            or match.get("videogame_title")
+        )
+        raw_date = (
+            match.get("begin_at")
+            or match.get("scheduled_at")
+            or match.get("original_scheduled_at")
+        )
+
+        return {
+            "match_id": _synthetic_provider_match_id(provider_match_id),
+            "date": _normalize_match_datetime(raw_date),
+            "event_name": event_name,
+            "best_of": _parse_best_of(match.get("number_of_games", match.get("best_of", 1))),
+            "team1_id": _safe_int(teams[0].get("id")),
+            "team2_id": _safe_int(teams[1].get("id")),
+            "team1_name": _safe_str(teams[0].get("name")),
+            "team2_name": _safe_str(teams[1].get("name")),
         }
 
     def _normalize_result_payload(self, match: dict) -> dict | None:
@@ -554,21 +821,29 @@ class HLTVScraper:
         except Exception:
             return {"blocked": False, "status": "error", "challenge": False}
 
-    def _resolve_team_id(self, team_id: int, team_name: str) -> int:
-        if team_id > 0:
+    def _resolve_team_id(self, team_id: int, team_name: str, provider: str = "hltv") -> int:
+        name = _safe_str(team_name)
+
+        if provider == "hltv" and team_id > 0:
             return team_id
 
-        name = _safe_str(team_name)
+        if name:
+            team = self.db.get_team_by_name(name)
+            if team:
+                return int(team["id"])
+
+            relaxed_id = self._lookup_team_by_name_relaxed(name)
+            if relaxed_id:
+                return relaxed_id
+
+        if team_id > 0 and provider != "hltv":
+            synthetic_id = _synthetic_provider_team_id(team_id)
+            if name:
+                self.db.upsert_team(synthetic_id, name, ranking=9999)
+            return synthetic_id
+
         if not name:
             return 0
-
-        team = self.db.get_team_by_name(name)
-        if team:
-            return int(team["id"])
-
-        relaxed_id = self._lookup_team_by_name_relaxed(name)
-        if relaxed_id:
-            return relaxed_id
 
         synthetic_id = _synthetic_team_id(name)
         self.db.upsert_team(synthetic_id, name, ranking=9999)
@@ -583,6 +858,22 @@ class HLTVScraper:
             if _normalize_team_name(team.get("name", "")) == target:
                 return _safe_int(team.get("id"))
         return 0
+
+    def _ensure_team_exists(self, team_id: int, team_name: str):
+        if team_id == 0:
+            return
+
+        team = self.db.get_team(team_id)
+        if team:
+            return
+
+        safe_name = _safe_str(team_name) or f"Team {team_id}"
+        self.db.upsert_team(team_id, safe_name, ranking=9999 if team_id < 0 else 0)
+
+    def _is_within_upcoming_window(self, date_value: datetime) -> bool:
+        now = datetime.utcnow() - timedelta(hours=1)
+        latest = datetime.utcnow() + timedelta(days=self.upcoming_days_ahead)
+        return now <= date_value <= latest
 
     # ============================================================
     # Full update
@@ -689,6 +980,51 @@ def _synthetic_team_id(team_name: str) -> int:
     return -((zlib.crc32(norm.encode("utf-8")) % 2_000_000_000) + 1)
 
 
+def _synthetic_provider_team_id(provider_team_id: int) -> int:
+    if provider_team_id <= 0:
+        return 0
+    return -(SYNTHETIC_TEAM_ID_BASE + provider_team_id)
+
+
+def _synthetic_provider_match_id(provider_match_id: int) -> int:
+    if provider_match_id <= 0:
+        return 0
+    return -(SYNTHETIC_MATCH_ID_BASE + provider_match_id)
+
+
+def _extract_pandascore_teams(match_data: dict) -> list[dict]:
+    teams = []
+    opponents = match_data.get("opponents")
+    if isinstance(opponents, list):
+        for item in opponents:
+            if not isinstance(item, dict):
+                continue
+            opponent = item.get("opponent", item)
+            if not isinstance(opponent, dict):
+                continue
+            name = _safe_str(opponent.get("name", opponent.get("acronym", "")))
+            if not name:
+                continue
+            teams.append({"id": _safe_int(opponent.get("id")), "name": name})
+
+    if len(teams) >= 2:
+        return teams[:2]
+
+    fallback = match_data.get("teams")
+    if isinstance(fallback, list):
+        for item in fallback:
+            if not isinstance(item, dict):
+                continue
+            name = _safe_str(item.get("name", item.get("acronym", "")))
+            if not name:
+                continue
+            teams.append({"id": _safe_int(item.get("id")), "name": name})
+            if len(teams) >= 2:
+                break
+
+    return teams[:2]
+
+
 def _parse_best_of(val) -> int:
     if isinstance(val, int):
         return max(1, val)
@@ -759,6 +1095,28 @@ def _normalize_match_datetime(date_val, time_val=None) -> str:
 
     # Se nao reconheceu, preserva o valor original para nao perder informacao.
     return date_text
+
+
+def _parse_datetime(value) -> datetime | None:
+    text = _safe_str(value)
+    if not text:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo:
+            parsed = parsed.replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        pass
+
+    for date_fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(text, date_fmt)
+        except ValueError:
+            continue
+
+    return None
 
 
 def _parse_time(time_text: str) -> datetime | None:

@@ -17,6 +17,16 @@ scraper:
   proxy_path: ""  # ex: "proxies.txt"
   # Quantos meses de histórico buscar no backfill inicial
   backfill_months: 6
+  # Estratégia de provider para partidas futuras
+  upcoming_provider: "pandascore"
+  upcoming_fallback: "hltv"
+  upcoming_days_ahead: 7
+  upcoming_max_pages: 5
+  upcoming_retry_count: 3
+  upcoming_retry_backoff_sec: 2
+  # PandaScore
+  pandascore_base_url: "https://api.pandascore.co"
+  pandascore_token_env: "PANDASCORE_API_TOKEN"
 
 # Banco de dados
 database:
