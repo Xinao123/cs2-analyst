@@ -12,6 +12,8 @@ from scraper.odds import (
     _extract_bookmaker_quotes,
     _index_local_matches,
     _normalize_fixture_payload,
+    _payload_has_no_odds,
+    _score_sport_name,
 )
 
 
@@ -148,6 +150,23 @@ class OddsSyncTests(unittest.TestCase):
         quotes = _extract_bookmaker_quotes(payload, fixture)
         self.assertEqual(2, len(quotes))
         self.assertEqual({"home", "away"}, {q["side"] for q in quotes})
+
+    def test_sport_score_prefers_counter_strike(self):
+        cs_score = _score_sport_name("Counter-Strike 2 Esports")
+        val_score = _score_sport_name("Valorant Esports")
+        generic_score = _score_sport_name("Esports")
+        self.assertGreater(cs_score, val_score)
+        self.assertGreater(cs_score, generic_score)
+        self.assertGreater(cs_score, 0)
+
+    def test_payload_without_odds_is_classified(self):
+        payload = {
+            "fixtureId": "id123",
+            "participant1Id": "a",
+            "participant2Id": "b",
+            "hasOdds": False,
+        }
+        self.assertTrue(_payload_has_no_odds(payload))
 
     def test_sync_persists_latest_and_snapshots_idempotently(self):
         os.environ[self.token_env] = "test-token"

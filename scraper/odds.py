@@ -51,6 +51,7 @@ class OddsPapiSync:
         self.token_env = _safe_str(odds_cfg.get("token_env", "ODDSPAPI_API_KEY")) or "ODDSPAPI_API_KEY"
         self.sport_id = _safe_str(odds_cfg.get("sport_id", ""))
         self.market = _safe_str(odds_cfg.get("market", "h2h")).lower() or "h2h"
+        self.odds_verbosity = max(0, _safe_int(odds_cfg.get("verbosity", 3)))
 
         self.refresh_minutes = max(1, _safe_int(odds_cfg.get("refresh_minutes", 10)))
         self.match_window_hours = max(1, _safe_int(odds_cfg.get("match_window_hours", 6)))
@@ -89,6 +90,7 @@ class OddsPapiSync:
         )
 
         self._resolved_sport_id = self.sport_id
+        self._resolved_sport_name = ""
         self._api_base_url = self.base_url
 
     @property
@@ -167,6 +169,9 @@ class OddsPapiSync:
             odds_payload, odds_error = self._fetch_fixture_odds(token, sport_id, fixture_id)
             if odds_error:
                 report["reasons"]["api_error"] += 1
+                continue
+            if _payload_has_no_odds(odds_payload):
+                report["reasons"]["sem_odds"] += 1
                 continue
 
             quotes = _extract_bookmaker_quotes(odds_payload, fixture)
@@ -266,6 +271,12 @@ class OddsPapiSync:
 
     def _resolve_sport_id(self, token: str) -> str:
         if self._resolved_sport_id:
+            if self._resolved_sport_name:
+                logger.info(
+                    "[ODDS][oddspapi] sport selecionado: id=%s nome=%s",
+                    self._resolved_sport_id,
+                    self._resolved_sport_name,
+                )
             return self._resolved_sport_id
 
         payload = None
@@ -284,6 +295,7 @@ class OddsPapiSync:
             return ""
 
         best_id = ""
+        best_name = ""
         best_score = -1
         for item in sports:
             if not isinstance(item, dict):
@@ -307,11 +319,20 @@ class OddsPapiSync:
             if score > best_score:
                 best_score = score
                 best_id = sid
+                best_name = _safe_str(item.get("sportName", item.get("name", item.get("slug", ""))))
 
         if best_score < 1:
+            logger.warning("[ODDS][oddspapi] Nenhum esporte CS encontrado (score=%s).", best_score)
             return ""
 
         self._resolved_sport_id = best_id
+        self._resolved_sport_name = best_name
+        logger.info(
+            "[ODDS][oddspapi] sport selecionado: id=%s nome=%s score=%s",
+            self._resolved_sport_id,
+            self._resolved_sport_name,
+            best_score,
+        )
         return best_id
 
     def _fetch_fixtures(self, token: str, sport_id: str) -> tuple[list[dict], str]:
@@ -327,6 +348,7 @@ class OddsPapiSync:
                 "sport": sport_id,
                 "sportId": sport_id,
                 "status": "upcoming",
+                "hasOdds": "true",
                 "page": page,
                 "perPage": self.per_page,
                 "startDate": now.isoformat(),
@@ -380,6 +402,7 @@ class OddsPapiSync:
             "fixtureId": fixture_id,
             "market": self.market,
             "oddsFormat": "decimal",
+            "verbosity": self.odds_verbosity,
             "bookmakers": ",".join(sorted(self.bookmaker_whitelist)),
         }
 
@@ -1033,17 +1056,17 @@ def _score_sport_name(name: str) -> int:
 
     score = 0
     if "counterstrike" in normalized or "counter-strike" in normalized:
-        score += 10
-    if "counter" in normalized and "strike" in normalized:
-        score += 6
-    if "cs2" in normalized:
-        score += 6
-    if "csgo" in normalized:
-        score += 5
+        score += 100
     if "counter strike" in normalized:
-        score += 5
-    if "esport" in normalized:
-        score += 1
+        score += 90
+    if "counter" in normalized and "strike" in normalized:
+        score += 80
+    if "cs2" in normalized:
+        score += 70
+    if "csgo" in normalized:
+        score += 60
+    if any(token in normalized for token in ("valorant", "dota", "leagueoflegends", "lol", "rocketleague")):
+        score -= 30
     return score
 
 
@@ -1141,6 +1164,20 @@ def _payload_shape_summary(payload) -> str:
         keys = list(payload.keys())[:10]
         return f"dict keys={keys}"
     return type(payload).__name__
+
+
+def _payload_has_no_odds(payload) -> bool:
+    if payload is None:
+        return True
+    if isinstance(payload, dict):
+        if payload.get("hasOdds") is False:
+            return True
+        bookmaker_odds = payload.get("bookmakerOdds")
+        if isinstance(bookmaker_odds, dict) and not bookmaker_odds:
+            return True
+        if bookmaker_odds is None and "fixtureId" in payload and "participant1Id" in payload:
+            return True
+    return False
 
 
 def _parse_datetime(value) -> datetime | None:
