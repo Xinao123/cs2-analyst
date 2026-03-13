@@ -107,23 +107,47 @@ async def analyze_upcoming(
     analyzed = 0
     skipped_no_features = 0
     skipped_no_prediction = 0
-    skipped_started = 0
-    top_bets_count = max(1, int(config.get("model", {}).get("top_bets_count", 5)))
-    min_minutes_before_match = max(0, int(config.get("model", {}).get("min_minutes_before_match", 5)))
+    filtered_started = 0
+    filtered_low_data = 0
+    filtered_low_confidence = 0
+    filtered_low_value = 0
+    filtered_stale_odds = 0
+
+    model_cfg = config.get("model", {})
+    odds_cfg = config.get("odds", {})
+
+    top_bets_count = max(1, int(model_cfg.get("top_bets_count", 5)))
+    min_minutes_before_match = max(0, int(model_cfg.get("min_minutes_before_match", 5)))
+    min_confidence_filter = max(0.0, float(model_cfg.get("min_confidence", 70.0)))
+    min_value_filter = max(0.0, float(model_cfg.get("min_value_pct", 8.0)))
+    min_recent_matches = max(0, int(model_cfg.get("live_min_recent_matches", 5)))
+    form_window_days = max(1, int(model_cfg.get("form_window_days", 365)))
+    max_pick_odds_age_minutes = max(1, int(odds_cfg.get("max_pick_odds_age_minutes", 120)))
+
+    now_dt = datetime.now()
     min_start_cutoff = datetime.now() + timedelta(minutes=min_minutes_before_match)
-    candidates: list[dict] = []
-    value_candidates: list[dict] = []
+    approved_candidates: list[dict] = []
     candidates_with_odds = 0
 
     for match in upcoming:
         match_dt = _parse_datetime(match.get("date"))
         if match_dt and match_dt <= min_start_cutoff:
-            skipped_started += 1
+            filtered_started += 1
+            continue
+
+        if not _has_min_recent_data(
+            db,
+            match,
+            min_recent_matches=min_recent_matches,
+            form_window_days=form_window_days,
+        ):
+            filtered_low_data += 1
             continue
 
         features = features_ext.extract(match)
         if not features:
             skipped_no_features += 1
+            filtered_low_data += 1
             continue
 
         prediction = predictor.predict(features)
@@ -158,25 +182,17 @@ async def analyze_upcoming(
             candidates_with_odds += 1
 
         best_vb = _best_value_bet(analysis)
-        predicted_winner_id = (
-            match["team1_id"] if prediction["predicted_winner"] == 1
-            else match["team2_id"]
-        )
-        suggested_bet = ""
-        suggested_stake = 0.0
-        value_pct = 0.0
-        if best_vb:
-            suggested_bet = (
-                match.get("team1_name", "")
-                if best_vb.get("side") == "team1"
-                else match.get("team2_name", "")
-            )
-            suggested_stake = float(best_vb.get("suggested_stake", 0.0))
-            value_pct = float(best_vb.get("value_pct", 0.0))
+        pick_meta = _build_pick_meta(match, prediction, best_vb)
+        suggested_bet = pick_meta["official_pick_name"] if best_vb else ""
+        suggested_stake = float(best_vb.get("suggested_stake", 0.0)) if best_vb else 0.0
+        value_pct = float(best_vb.get("value_pct", 0.0)) if best_vb else 0.0
 
         db.save_prediction(
             match_id=match["id"],
-            predicted_winner_id=predicted_winner_id,
+            predicted_winner_id=pick_meta["official_pick_winner_id"],
+            model_winner_id=pick_meta["model_winner_id"],
+            official_pick_winner_id=pick_meta["official_pick_winner_id"],
+            pick_source=pick_meta["pick_source"],
             team1_win_prob=prediction["team1_win_prob"],
             team2_win_prob=prediction["team2_win_prob"],
             value_pct=value_pct,
@@ -186,49 +202,70 @@ async def analyze_upcoming(
             odds_team2=match.get("odds_team2"),
         )
 
-        score = _score_bet_candidate(prediction, analysis)
-        best_odd = float(best_vb.get("odds", 0.0)) if best_vb else 0.0
-        candidates.append(
-            {
-                "match": match,
-                "prediction": prediction,
-                "analysis": analysis,
-                "score": score,
-                "best_vb": best_vb or {},
-                "best_odd": best_odd,
-            }
-        )
+        confidence = float(prediction.get("confidence", 0.0))
+        if confidence < min_confidence_filter:
+            filtered_low_confidence += 1
+            continue
 
-        if analysis.get("has_value"):
-            value_count += 1
-            value_candidates.append(candidates[-1])
+        if not best_vb:
+            filtered_low_value += 1
+            continue
+
+        value_pct = float(best_vb.get("value_pct", 0.0))
+        if value_pct < min_value_filter:
+            filtered_low_value += 1
+            continue
+
+        if not _is_odds_fresh(match.get("odds_updated_at"), max_pick_odds_age_minutes, now_dt):
+            filtered_stale_odds += 1
+            continue
+
+        score = _score_bet_candidate(prediction, best_vb)
+        best_odd = float(best_vb.get("odds", 0.0))
+        candidate = {
+            "match": match,
+            "prediction": prediction,
+            "analysis": analysis,
+            "score": score,
+            "best_vb": best_vb,
+            "best_odd": best_odd,
+            "official_pick_side": pick_meta["official_pick_side"],
+            "official_pick_name": pick_meta["official_pick_name"],
+            "official_pick_winner_id": pick_meta["official_pick_winner_id"],
+            "model_winner_id": pick_meta["model_winner_id"],
+            "model_winner_name": pick_meta["model_winner_name"],
+            "pick_source": pick_meta["pick_source"],
+            "model_vs_official_diverged": pick_meta["model_vs_official_diverged"],
+        }
+        approved_candidates.append(candidate)
+        value_count += 1
 
         logger.info(
-            "  %s (%s%%) vs %s (%s%%) | confianca=%s%% | has_value=%s | score=%.2f",
+            "  %s (%s%%) vs %s (%s%%) | confianca=%s%% | pick=%s | score=%.2f",
             match.get("team1_name", "?"),
             round(prediction["team1_win_prob"]),
             match.get("team2_name", "?"),
             round(prediction["team2_win_prob"]),
             round(prediction["confidence"]),
-            "sim" if analysis.get("has_value") else "nao",
+            pick_meta["official_pick_name"] or "-",
             score,
         )
 
-    value_candidates.sort(
+    approved_candidates.sort(
         key=lambda item: (float(item.get("score", 0.0)), float(item.get("best_odd", 0.0))),
         reverse=True,
     )
-    top_picks = value_candidates[:top_bets_count]
+    top_picks = approved_candidates[:top_bets_count]
     if daily_auditor:
         capture = daily_auditor.capture_daily_top5(
             picks=top_picks,
             requested_top=top_bets_count,
-            total_candidates=len(candidates),
+            total_candidates=analyzed,
             candidates_with_odds=candidates_with_odds,
         )
         if capture.get("created"):
             logger.info(
-                "[AUDIT] Carteira Top 5 do dia congelada: data=%s status=%s itens=%s",
+                "[AUDIT] Carteira oficial do dia congelada: data=%s status=%s itens=%s",
                 capture.get("run_date"),
                 capture.get("status"),
                 capture.get("items"),
@@ -242,7 +279,7 @@ async def analyze_upcoming(
 
     notifier.top_picks_alert(
         top_picks,
-        total_candidates=len(candidates),
+        total_candidates=analyzed,
         requested_top=top_bets_count,
         candidates_with_odds=candidates_with_odds,
     )
@@ -250,39 +287,47 @@ async def analyze_upcoming(
         logger.info(
             "[ANALYSIS] Top %s enviados (%s candidatos totais, %s com odds, %s value)",
             len(top_picks),
-            len(candidates),
+            analyzed,
             candidates_with_odds,
-            len(value_candidates),
+            len(approved_candidates),
         )
     else:
         logger.info(
             "[ANALYSIS] Sem oportunidades de value no ciclo (%s candidatos, %s com odds)",
-            len(candidates),
+            analyzed,
             candidates_with_odds,
         )
 
     logger.info(
-        "[ANALYSIS] %s partidas analisadas, %s value bets (sem_features=%s, sem_pred=%s, iniciadas=%s, cutoff=%smin)",
+        "[ANALYSIS] %s partidas analisadas, %s picks aprovadas "
+        "(sem_features=%s, sem_pred=%s, filtered_started=%s, filtered_low_data=%s, "
+        "filtered_low_confidence=%s, filtered_low_value=%s, filtered_stale_odds=%s, cutoff=%smin)",
         analyzed,
         value_count,
         skipped_no_features,
         skipped_no_prediction,
-        skipped_started,
+        filtered_started,
+        filtered_low_data,
+        filtered_low_confidence,
+        filtered_low_value,
+        filtered_stale_odds,
         min_minutes_before_match,
     )
     return value_count
 
 
-def _score_bet_candidate(prediction: dict, analysis: dict) -> float:
-    """Score fixo para ranking value-only."""
-    best_vb = _best_value_bet(analysis)
+def _score_bet_candidate(prediction: dict, analysis_or_best: dict) -> float:
+    """Score conservador orientado a precisão."""
+    best_vb = analysis_or_best
+    if "value_bets" in analysis_or_best:
+        best_vb = _best_value_bet(analysis_or_best)
     if not best_vb:
         return 0.0
 
     value_pct = max(0.0, float(best_vb.get("value_pct", 0.0)))
     expected_value = max(0.0, float(best_vb.get("expected_value", 0.0)))
     confidence = max(0.0, float(prediction.get("confidence", 0.0)))
-    score = (value_pct * 2.0) + (expected_value * 0.5) + (confidence * 0.3)
+    score = (confidence * 1.4) + (value_pct * 0.8) + (min(expected_value, 30.0) * 0.2)
     return round(score, 4)
 
 
@@ -332,6 +377,73 @@ def _parse_datetime(value) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _build_pick_meta(match: dict, prediction: dict, best_vb: dict | None) -> dict:
+    model_side = "team1" if int(prediction.get("predicted_winner", 1)) == 1 else "team2"
+    if model_side == "team2":
+        model_winner_id = int(match.get("team2_id", 0) or 0)
+        model_winner_name = str(match.get("team2_name", ""))
+    else:
+        model_winner_id = int(match.get("team1_id", 0) or 0)
+        model_winner_name = str(match.get("team1_name", ""))
+
+    official_side = model_side
+    if best_vb and str(best_vb.get("side", "")).lower() in {"team1", "team2"}:
+        official_side = str(best_vb.get("side")).lower()
+
+    if official_side == "team2":
+        official_pick_winner_id = int(match.get("team2_id", 0) or 0)
+        official_pick_name = str(match.get("team2_name", ""))
+    else:
+        official_pick_winner_id = int(match.get("team1_id", 0) or 0)
+        official_pick_name = str(match.get("team1_name", ""))
+
+    return {
+        "model_side": model_side,
+        "model_winner_id": model_winner_id,
+        "model_winner_name": model_winner_name,
+        "official_pick_side": official_side,
+        "official_pick_winner_id": official_pick_winner_id,
+        "official_pick_name": official_pick_name,
+        "pick_source": "value" if best_vb else "model",
+        "model_vs_official_diverged": model_side != official_side,
+    }
+
+
+def _is_odds_fresh(odds_updated_at, max_age_minutes: int, now_dt: datetime | None = None) -> bool:
+    if max_age_minutes <= 0:
+        return True
+
+    updated_dt = _parse_datetime(odds_updated_at)
+    if not updated_dt:
+        return False
+
+    now_dt = now_dt or datetime.now()
+    age_min = (now_dt - updated_dt).total_seconds() / 60.0
+    if age_min < 0:
+        return True
+    return age_min <= max_age_minutes
+
+
+def _has_min_recent_data(
+    db: Database,
+    match: dict,
+    min_recent_matches: int,
+    form_window_days: int,
+) -> bool:
+    if min_recent_matches <= 0:
+        return True
+
+    team1_id = int(match.get("team1_id", 0) or 0)
+    team2_id = int(match.get("team2_id", 0) or 0)
+    if team1_id == 0 or team2_id == 0:
+        return False
+
+    limit = max(min_recent_matches, 5)
+    t1_recent = db.get_team_recent_matches(team1_id, limit=limit, days=form_window_days)
+    t2_recent = db.get_team_recent_matches(team2_id, limit=limit, days=form_window_days)
+    return len(t1_recent) >= min_recent_matches and len(t2_recent) >= min_recent_matches
 
 
 async def update_data(db: Database, config: dict):

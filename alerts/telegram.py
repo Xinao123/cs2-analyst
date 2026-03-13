@@ -114,7 +114,11 @@ class Notifier:
             p1 = float(pred.get("team1_win_prob", 50.0))
             p2 = float(pred.get("team2_win_prob", 50.0))
             conf = float(pred.get("confidence", 50.0))
-            side = t1 if pred.get("predicted_winner") == 1 else t2
+            side = _safe_text(item.get("official_pick_name", ""))
+            if not side:
+                side = t1 if pred.get("predicted_winner") == 1 else t2
+            model_side = t1 if pred.get("predicted_winner") == 1 else t2
+            diverged = bool(item.get("model_vs_official_diverged", False))
 
             best_vb = item.get("best_vb") or {}
             if not best_vb:
@@ -133,6 +137,7 @@ class Notifier:
                     f"   🗓 {_html_escape(when)}",
                     f"   🏆 {_html_escape(event) if event else '-'}",
                     f"   🎯 Pick: {_html_escape(side)} ({p1:.1f}% x {p2:.1f}%, conf {conf:.1f}%)",
+                    f"   🔀 Modelo: {_html_escape(model_side)}" if diverged else "",
                     f"   💵 Odd: {odd:.2f} ({_html_escape(bookmaker)})",
                     f"   📈 Value: +{value_pct:.1f}% | EV: R$ {ev:.2f}",
                     f"   📌 Score: {score:.2f}",
@@ -184,6 +189,7 @@ class Notifier:
         resolved = int(summary.get("resolved", 0))
         total = int(summary.get("total", len(items)))
         accuracy = float(summary.get("accuracy", 0.0))
+        divergences = int(summary.get("model_vs_official_divergences", 0))
 
         if not items:
             self._send(
@@ -204,6 +210,7 @@ class Notifier:
             f"📅 Carteira: {run_date_fmt}",
             f"✅ Acertos: {wins} | ❌ Erros: {losses} | ⏳ Pendentes: {pending}",
             f"🎯 Accuracy (resolvidas): {accuracy:.1f}% ({wins}/{resolved})",
+            f"🔀 Modelo vs Pick oficial (divergências): {divergences}",
             "",
         ]
 
@@ -218,11 +225,13 @@ class Notifier:
             rank = int(item.get("rank", 0))
             t1 = _safe_text(item.get("team1_name", "Team 1"))
             t2 = _safe_text(item.get("team2_name", "Team 2"))
-            pick = _safe_text(item.get("predicted_winner_name", "-"))
+            pick = _safe_text(item.get("official_pick_winner_name", item.get("predicted_winner_name", "-")))
+            model_pick = _safe_text(item.get("model_winner_name", ""))
             res_method = _safe_text(item.get("resolution_method", ""))
             res_suffix = f" ({res_method})" if res_method else ""
+            model_suffix = f" | modelo: {model_pick}" if model_pick and model_pick != pick else ""
             lines.append(
-                f"{icon} {rank}. <b>{_html_escape(t1)} vs {_html_escape(t2)}</b> | Pick: {_html_escape(pick)}{_html_escape(res_suffix)}"
+                f"{icon} {rank}. <b>{_html_escape(t1)} vs {_html_escape(t2)}</b> | Pick: {_html_escape(pick)}{_html_escape(model_suffix)}{_html_escape(res_suffix)}"
             )
 
         lines.append("")

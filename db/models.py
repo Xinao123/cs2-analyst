@@ -109,6 +109,9 @@ CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     match_id INTEGER NOT NULL,
     predicted_winner_id INTEGER,
+    model_winner_id INTEGER,
+    official_pick_winner_id INTEGER,
+    pick_source TEXT DEFAULT 'value',
     team1_win_prob REAL,
     team2_win_prob REAL,
     value_pct REAL,
@@ -172,6 +175,11 @@ CREATE TABLE IF NOT EXISTS daily_top5_items (
     team2_id INTEGER,
     team1_name TEXT,
     team2_name TEXT,
+    model_winner_id INTEGER,
+    model_winner_name TEXT,
+    official_pick_winner_id INTEGER,
+    official_pick_winner_name TEXT,
+    pick_source TEXT DEFAULT 'value',
     predicted_winner_id INTEGER,
     predicted_winner_name TEXT,
     team1_win_prob REAL,
@@ -221,7 +229,28 @@ class Database:
     def _init_db(self):
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._apply_migrations(conn)
             logger.info(f"[DB] Inicializado: {self.db_path}")
+
+    def _apply_migrations(self, conn: sqlite3.Connection):
+        # predictions table migrations
+        self._ensure_column(conn, "predictions", "model_winner_id", "INTEGER")
+        self._ensure_column(conn, "predictions", "official_pick_winner_id", "INTEGER")
+        self._ensure_column(conn, "predictions", "pick_source", "TEXT DEFAULT 'value'")
+
+        # daily_top5_items table migrations
+        self._ensure_column(conn, "daily_top5_items", "model_winner_id", "INTEGER")
+        self._ensure_column(conn, "daily_top5_items", "model_winner_name", "TEXT")
+        self._ensure_column(conn, "daily_top5_items", "official_pick_winner_id", "INTEGER")
+        self._ensure_column(conn, "daily_top5_items", "official_pick_winner_name", "TEXT")
+        self._ensure_column(conn, "daily_top5_items", "pick_source", "TEXT DEFAULT 'value'")
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, column_def: str):
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {row["name"] for row in rows}
+        if column in existing:
+            return
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
 
     @contextmanager
     def connect(self):
@@ -487,13 +516,17 @@ class Database:
     def save_prediction(self, match_id: int, **kwargs):
         with self.connect() as conn:
             conn.execute(
-                """INSERT INTO predictions (match_id, predicted_winner_id, team1_win_prob,
-                     team2_win_prob, value_pct, suggested_bet, suggested_stake,
-                     odds_team1, odds_team2, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO predictions
+                     (match_id, predicted_winner_id, model_winner_id, official_pick_winner_id, pick_source,
+                      team1_win_prob, team2_win_prob, value_pct, suggested_bet, suggested_stake,
+                      odds_team1, odds_team2, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     match_id,
-                    kwargs.get("predicted_winner_id"),
+                    kwargs.get("official_pick_winner_id", kwargs.get("predicted_winner_id")),
+                    kwargs.get("model_winner_id", kwargs.get("predicted_winner_id")),
+                    kwargs.get("official_pick_winner_id", kwargs.get("predicted_winner_id")),
+                    kwargs.get("pick_source", "value"),
                     kwargs.get("team1_win_prob", 0.5),
                     kwargs.get("team2_win_prob", 0.5),
                     kwargs.get("value_pct", 0.0),
@@ -571,10 +604,13 @@ class Database:
                 conn.execute(
                     """INSERT OR REPLACE INTO daily_top5_items
                          (run_id, rank, match_id, match_date, event_name, team1_id, team2_id,
-                          team1_name, team2_name, predicted_winner_id, predicted_winner_name,
+                          team1_name, team2_name,
+                          model_winner_id, model_winner_name,
+                          official_pick_winner_id, official_pick_winner_name, pick_source,
+                          predicted_winner_id, predicted_winner_name,
                           team1_win_prob, team2_win_prob, confidence, score, odds, bookmaker,
                           value_pct, expected_value, outcome_status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         run_id,
                         item.get("rank", 0),
@@ -585,8 +621,13 @@ class Database:
                         item.get("team2_id"),
                         item.get("team1_name", ""),
                         item.get("team2_name", ""),
-                        item.get("predicted_winner_id"),
-                        item.get("predicted_winner_name", ""),
+                        item.get("model_winner_id", item.get("predicted_winner_id")),
+                        item.get("model_winner_name", item.get("predicted_winner_name", "")),
+                        item.get("official_pick_winner_id", item.get("predicted_winner_id")),
+                        item.get("official_pick_winner_name", item.get("predicted_winner_name", "")),
+                        item.get("pick_source", "value"),
+                        item.get("official_pick_winner_id", item.get("predicted_winner_id")),
+                        item.get("official_pick_winner_name", item.get("predicted_winner_name", "")),
                         item.get("team1_win_prob"),
                         item.get("team2_win_prob"),
                         item.get("confidence"),

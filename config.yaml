@@ -45,6 +45,7 @@ odds:
   timeout_sec: 15
   retry_count: 3
   retry_backoff_sec: 2
+  max_pick_odds_age_minutes: 120
   bookmaker_whitelist: ["bet365", "betano", "pinnacle", "1xbet"]
 
 # Modelo
@@ -54,7 +55,7 @@ model:
   # Minimo de partidas do time pra considerar nas features
   min_matches: 0
   # Minimo de jogos recentes por time na inferencia ao vivo
-  live_min_recent_matches: 0
+  live_min_recent_matches: 5
   # Minimo de jogos recentes por time no treino
   train_min_recent_matches: 0
   # Janela de forma recente (dias)
@@ -68,11 +69,11 @@ model:
   low_data_rank_blend: 0.35
   rank_prior_scale: 12.0
   # Minimo de value (%) pra disparar alerta
-  min_value_pct: 4.0
+  min_value_pct: 8.0
   # Confianca minima do modelo (%) pra considerar
-  min_confidence: 55.0
+  min_confidence: 70.0
   # Quantidade de melhores partidas para ranking por ciclo
-  top_bets_count: 5
+  top_bets_count: 3
   # Ignora partidas que comecam em ate X minutos (ou que ja iniciaram)
   min_minutes_before_match: 5
 

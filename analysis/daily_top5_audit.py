@@ -144,9 +144,15 @@ class DailyTop5Auditor:
                 if not resolved:
                     continue
 
-                predicted_winner_id = _safe_int(item.get("predicted_winner_id"))
+                official_pick_winner_id = _safe_int(
+                    item.get("official_pick_winner_id", item.get("predicted_winner_id"))
+                )
                 actual_winner_id = _safe_int(resolved.get("actual_winner_id"))
-                outcome_status = "win" if predicted_winner_id > 0 and predicted_winner_id == actual_winner_id else "loss"
+                outcome_status = (
+                    "win"
+                    if official_pick_winner_id > 0 and official_pick_winner_id == actual_winner_id
+                    else "loss"
+                )
 
                 self.db.update_daily_top5_item_outcome(
                     item_id=int(item.get("id", 0)),
@@ -163,6 +169,13 @@ class DailyTop5Auditor:
         resolved = wins + losses
         total = len(items)
         accuracy = (wins / resolved * 100.0) if resolved else 0.0
+        model_vs_official_divergences = sum(
+            1
+            for i in items
+            if _safe_int(i.get("model_winner_id")) > 0
+            and _safe_int(i.get("official_pick_winner_id")) > 0
+            and _safe_int(i.get("model_winner_id")) != _safe_int(i.get("official_pick_winner_id"))
+        )
 
         status = "audited_empty"
         if total > 0:
@@ -180,6 +193,7 @@ class DailyTop5Auditor:
             "resolved": resolved,
             "total": total,
             "accuracy": round(accuracy, 1),
+            "model_vs_official_divergences": model_vs_official_divergences,
         }
         if send_notification:
             self.notifier.daily_top5_audit_report(summary)
@@ -198,10 +212,23 @@ class DailyTop5Auditor:
         predicted_winner = _safe_int(prediction.get("predicted_winner"))
         team1_id = _safe_int(match.get("team1_id"))
         team2_id = _safe_int(match.get("team2_id"))
-        predicted_winner_id = team1_id if predicted_winner == 1 else team2_id
-        predicted_winner_name = (
+        model_winner_id = team1_id if predicted_winner == 1 else team2_id
+        model_winner_name = (
             str(match.get("team1_name", "")) if predicted_winner == 1 else str(match.get("team2_name", ""))
         )
+
+        official_side = str(
+            pick.get(
+                "official_pick_side",
+                best_vb.get("side", "team1" if predicted_winner == 1 else "team2"),
+            )
+        ).lower()
+        if official_side == "team2":
+            official_pick_winner_id = team2_id
+            official_pick_winner_name = str(match.get("team2_name", ""))
+        else:
+            official_pick_winner_id = team1_id
+            official_pick_winner_name = str(match.get("team1_name", ""))
 
         return {
             "rank": rank,
@@ -212,8 +239,14 @@ class DailyTop5Auditor:
             "team2_id": team2_id or None,
             "team1_name": str(match.get("team1_name", "")),
             "team2_name": str(match.get("team2_name", "")),
-            "predicted_winner_id": predicted_winner_id or None,
-            "predicted_winner_name": predicted_winner_name,
+            "model_winner_id": model_winner_id or None,
+            "model_winner_name": model_winner_name,
+            "official_pick_winner_id": official_pick_winner_id or None,
+            "official_pick_winner_name": official_pick_winner_name,
+            "pick_source": str(pick.get("pick_source", "value")),
+            # Backward-compatible aliases.
+            "predicted_winner_id": official_pick_winner_id or None,
+            "predicted_winner_name": official_pick_winner_name,
             "team1_win_prob": _safe_float(prediction.get("team1_win_prob")),
             "team2_win_prob": _safe_float(prediction.get("team2_win_prob")),
             "confidence": _safe_float(prediction.get("confidence")),

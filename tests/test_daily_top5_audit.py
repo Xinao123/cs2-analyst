@@ -227,7 +227,41 @@ class DailyTop5AuditTests(unittest.TestCase):
         self.assertIsNone(second)
         self.assertEqual(1, len(self.notifier.audit_reports))
 
+    def test_audit_uses_official_pick_when_model_diverges(self):
+        dt = datetime(2026, 3, 13, 15, 0, tzinfo=timezone.utc)
+        match_id = self.db.upsert_match(
+            hltv_id=1005,
+            date=dt.replace(tzinfo=None).isoformat(timespec="seconds"),
+            event_name="Divergence Cup",
+            team1_id=1,
+            team2_id=2,
+            team1_score=1,
+            team2_score=2,
+            winner_id=2,
+            status="completed",
+        )
+        match = self.db.get_match_result_by_id(match_id)
+        pick = self._make_pick(match, winner_side=1, score=95.0)
+        pick["best_vb"]["side"] = "team2"  # official pick by value
+
+        self.auditor.capture_daily_top5(
+            picks=[pick],
+            requested_top=5,
+            total_candidates=3,
+            candidates_with_odds=1,
+            now_local=dt,
+        )
+
+        summary = self.auditor.audit_date(dt.date().isoformat(), send_notification=False)
+        self.assertEqual(1, summary["wins"])
+        self.assertEqual(1, summary["model_vs_official_divergences"])
+
+        run = self.db.get_daily_top5_run(dt.date().isoformat())
+        items = self.db.get_daily_top5_items(int(run["id"]))
+        self.assertEqual(1, items[0]["model_winner_id"])
+        self.assertEqual(2, items[0]["official_pick_winner_id"])
+        self.assertEqual("win", items[0]["outcome_status"])
+
 
 if __name__ == "__main__":
     unittest.main()
-
