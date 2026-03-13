@@ -27,11 +27,17 @@ class Notifier:
             return
         try:
             url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            requests.post(
+            resp = requests.post(
                 url,
                 json={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"},
                 timeout=10,
             )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "[TG] Falha status=%s body=%s",
+                    resp.status_code,
+                    _safe_text(resp.text)[:500],
+                )
         except Exception as e:
             logger.warning(f"[TG] Falha: {e}")
 

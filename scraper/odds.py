@@ -142,6 +142,7 @@ class OddsPapiSync:
 
         indexed_matches = _index_local_matches(local_matches)
         used_match_ids: set[int] = set()
+        payload_invalid_logged = 0
 
         for fixture in fixtures:
             fixture_date = fixture.get("start_dt")
@@ -171,6 +172,13 @@ class OddsPapiSync:
             quotes = _extract_bookmaker_quotes(odds_payload, fixture)
             if not quotes:
                 report["reasons"]["payload_invalido"] += 1
+                if payload_invalid_logged < 3:
+                    logger.info(
+                        "[ODDS][oddspapi] payload sem quotes fixture=%s shape=%s",
+                        fixture_id,
+                        _payload_shape_summary(odds_payload),
+                    )
+                    payload_invalid_logged += 1
                 continue
 
             best = self._select_best_h2h_lines(quotes)
@@ -294,7 +302,8 @@ class OddsPapiSync:
                     item.get("name", item.get("title", item.get("slug", ""))),
                 )
             ).lower()
-            score = _score_sport_name(name)
+            slug = _safe_str(item.get("slug", ""))
+            score = _score_sport_name(f"{name} {slug}")
             if score > best_score:
                 best_score = score
                 best_id = sid
@@ -630,12 +639,7 @@ def _extract_bookmaker_quotes(payload: dict | list | None, fixture: dict) -> lis
                 side = _resolve_outcome_side(outcome, fixture)
                 if side == "draw":
                     continue
-                odds_val = _safe_float(
-                    outcome.get(
-                        "odds",
-                        outcome.get("price", outcome.get("decimalOdds", outcome.get("value", 0))),
-                    )
-                )
+                odds_val = _extract_outcome_price(outcome)
                 if side in ("home", "away") and odds_val > 1.0 and bookmaker:
                     quotes.append(
                         {
@@ -691,7 +695,10 @@ def _extract_root_blocks(payload: dict | list) -> list:
     if isinstance(bookmaker_odds, dict):
         out = []
         for bookmaker_name, markets in bookmaker_odds.items():
-            out.append({"bookmakerName": _safe_str(bookmaker_name), "markets": markets})
+            market_block = markets
+            if isinstance(market_block, dict) and isinstance(market_block.get("markets"), dict):
+                market_block = market_block.get("markets")
+            out.append({"bookmakerName": _safe_str(bookmaker_name), "markets": market_block})
         if out:
             return out
 
@@ -708,6 +715,8 @@ def _extract_markets(block: dict) -> list:
         if isinstance(value, list):
             return value
         if isinstance(value, dict):
+            if isinstance(value.get("markets"), dict):
+                value = value.get("markets")
             # Dict payload (OddsPapi v4): {"h2h": {...}} or {"101": {...}}
             if any(isinstance(v, dict) for v in value.values()):
                 return [{"marketKey": str(k), **(v if isinstance(v, dict) else {"odds": v})} for k, v in value.items()]
@@ -734,6 +743,9 @@ def _extract_outcomes(market: dict) -> list[dict]:
                 for name, odd in value.items():
                     outcomes.append({"name": str(name), "odds": odd})
                 return outcomes
+            # Nested outcomes map payload: {"10166": {...}, "10167": {...}}
+            if all(isinstance(v, dict) for v in value.values()):
+                return [item for item in value.values() if isinstance(item, dict)]
             return [value]
     # Flat map payload: {"marketKey": "h2h", "Team A": 1.9, "Team B": 2.0}
     outcomes = []
@@ -773,6 +785,13 @@ def _resolve_outcome_side(outcome: dict, fixture: dict) -> str:
     if _as_bool(outcome.get("isAway")):
         return "away"
 
+    outcome_name = _normalize_team_name(
+        outcome.get(
+            "outcomeName",
+            outcome.get("name", outcome.get("label", outcome.get("selection", ""))),
+        )
+    )
+
     token = _normalize_team_name(
         outcome.get(
             "bookmakerOutcomeId",
@@ -789,11 +808,11 @@ def _resolve_outcome_side(outcome: dict, fixture: dict) -> str:
         )
     )
 
-    if token in {"home", "team1", "1", "101"}:
+    if token in {"home", "team1", "1", "101"} or outcome_name in {"home", "team1", "1", "101"}:
         return "home"
-    if token in {"away", "team2", "2", "103"}:
+    if token in {"away", "team2", "2", "103"} or outcome_name in {"away", "team2", "2", "103"}:
         return "away"
-    if token in {"draw", "x", "102"}:
+    if token in {"draw", "x", "102"} or outcome_name in {"draw", "x", "102"}:
         return "draw"
 
     home_norm = _normalize_team_name(fixture.get("home_name", ""))
@@ -801,6 +820,10 @@ def _resolve_outcome_side(outcome: dict, fixture: dict) -> str:
     if home_norm and token == home_norm:
         return "home"
     if away_norm and token == away_norm:
+        return "away"
+    if home_norm and outcome_name == home_norm:
+        return "home"
+    if away_norm and outcome_name == away_norm:
         return "away"
 
     competitor = outcome.get("competitor", outcome.get("team"))
@@ -810,6 +833,20 @@ def _resolve_outcome_side(outcome: dict, fixture: dict) -> str:
             return "home"
         if away_norm and comp_name == away_norm:
             return "away"
+
+    players = outcome.get("players")
+    if isinstance(players, dict):
+        for _, player in players.items():
+            if not isinstance(player, dict):
+                continue
+            player_name = _normalize_team_name(
+                player.get("name", player.get("outcomeName", player.get("label", "")))
+            )
+            player_token = _normalize_team_name(player.get("bookmakerOutcomeId", ""))
+            if home_norm and (player_name == home_norm or player_token in {"home", "team1", "101"}):
+                return "home"
+            if away_norm and (player_name == away_norm or player_token in {"away", "team2", "103"}):
+                return "away"
 
     return ""
 
@@ -831,6 +868,33 @@ def _market_key(market: dict, fallback_block: dict) -> str:
         )
     )
     return key.lower()
+
+
+def _extract_outcome_price(outcome: dict) -> float:
+    direct = _safe_float(
+        outcome.get(
+            "odds",
+            outcome.get("price", outcome.get("decimalOdds", outcome.get("value", 0))),
+        )
+    )
+    if direct > 1.0:
+        return direct
+
+    players = outcome.get("players")
+    if isinstance(players, dict):
+        for _, player in players.items():
+            if not isinstance(player, dict):
+                continue
+            price = _safe_float(
+                player.get(
+                    "price",
+                    player.get("odds", player.get("decimalOdds", player.get("value", 0))),
+                )
+            )
+            if price > 1.0:
+                return price
+
+    return 0.0
 
 
 def _is_h2h_market(market_key: str, market: dict) -> bool:
@@ -968,11 +1032,15 @@ def _score_sport_name(name: str) -> int:
         return 0
 
     score = 0
+    if "counterstrike" in normalized or "counter-strike" in normalized:
+        score += 10
     if "counter" in normalized and "strike" in normalized:
         score += 6
     if "cs2" in normalized:
         score += 6
     if "csgo" in normalized:
+        score += 5
+    if "counter strike" in normalized:
         score += 5
     if "esport" in normalized:
         score += 1
@@ -1059,6 +1127,20 @@ def _snapshot_fingerprint(
         ]
     )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _payload_shape_summary(payload) -> str:
+    if payload is None:
+        return "none"
+    if isinstance(payload, list):
+        head = payload[0] if payload else {}
+        if isinstance(head, dict):
+            return f"list[{len(payload)}] keys={list(head.keys())[:8]}"
+        return f"list[{len(payload)}] type={type(head).__name__ if payload else 'empty'}"
+    if isinstance(payload, dict):
+        keys = list(payload.keys())[:10]
+        return f"dict keys={keys}"
+    return type(payload).__name__
 
 
 def _parse_datetime(value) -> datetime | None:

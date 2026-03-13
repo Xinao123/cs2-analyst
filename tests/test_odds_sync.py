@@ -117,6 +117,38 @@ class OddsSyncTests(unittest.TestCase):
         self.assertEqual({"home", "away"}, sides)
         self.assertEqual({"bet365"}, {q["bookmaker"] for q in quotes})
 
+    def test_extract_quotes_from_nested_outcomes_players(self):
+        fixture = {
+            "fixture_id": "9992",
+            "home_name": "FURIA",
+            "away_name": "TYLOO",
+            "start_dt": datetime.now(timezone.utc) + timedelta(hours=2),
+            "event_name": "Test",
+        }
+        payload = {
+            "bookmakerOdds": {
+                "pinnacle": {
+                    "markets": {
+                        "101": {
+                            "outcomes": {
+                                "a": {
+                                    "outcomeName": "FURIA",
+                                    "players": {"0": {"price": "1.91", "bookmakerOutcomeId": "home"}},
+                                },
+                                "b": {
+                                    "outcomeName": "TYLOO",
+                                    "players": {"0": {"price": "1.98", "bookmakerOutcomeId": "away"}},
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        quotes = _extract_bookmaker_quotes(payload, fixture)
+        self.assertEqual(2, len(quotes))
+        self.assertEqual({"home", "away"}, {q["side"] for q in quotes})
+
     def test_sync_persists_latest_and_snapshots_idempotently(self):
         os.environ[self.token_env] = "test-token"
         fixture_time = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
