@@ -101,16 +101,20 @@ async def analyze_upcoming(
     logger.info(f"[ANALYSIS] Analisando {len(upcoming)} partidas futuras...")
     value_count = 0
     analyzed = 0
+    skipped_no_features = 0
+    skipped_no_prediction = 0
 
     for match in upcoming:
         # Extrai features
         features = features_ext.extract(match)
         if not features:
+            skipped_no_features += 1
             continue
 
         # Predição
         prediction = predictor.predict(features)
         if not prediction:
+            skipped_no_prediction += 1
             continue
 
         analyzed += 1
@@ -158,7 +162,13 @@ async def analyze_upcoming(
         conf = prediction["confidence"]
         logger.info(f"  {t1} ({p1:.0f}%) vs {t2} ({p2:.0f}%) — confiança {conf:.0f}%")
 
-    logger.info(f"[ANALYSIS] {analyzed} partidas analisadas, {value_count} value bets")
+    logger.info(
+        "[ANALYSIS] %s partidas analisadas, %s value bets (sem_features=%s, sem_pred=%s)",
+        analyzed,
+        value_count,
+        skipped_no_features,
+        skipped_no_prediction,
+    )
     return value_count
 
 
@@ -234,8 +244,11 @@ async def run(config: dict, once: bool = False):
                 last_daily_update = now.date()
 
                 # Re-treina modelo com dados novos
+                stats = db.get_stats()
                 if stats["completed_matches"] >= 50:
-                    train_model(db, config, notifier)
+                    metrics = train_model(db, config, notifier)
+                    if metrics and "error" not in metrics:
+                        predictor = Predictor(config)
 
             # Busca partidas futuras e resultados novos
             scraper = HLTVScraper(db, config)
