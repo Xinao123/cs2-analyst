@@ -124,6 +124,8 @@ class OddsSyncTests(unittest.TestCase):
             "fixture_id": "9992",
             "home_name": "FURIA",
             "away_name": "TYLOO",
+            "home_id": "1132689",
+            "away_id": "1332262",
             "start_dt": datetime.now(timezone.utc) + timedelta(hours=2),
             "event_name": "Test",
         }
@@ -134,12 +136,12 @@ class OddsSyncTests(unittest.TestCase):
                         "101": {
                             "outcomes": {
                                 "a": {
-                                    "outcomeName": "FURIA",
-                                    "players": {"0": {"price": "1.91", "bookmakerOutcomeId": "home"}},
+                                    "outcomeName": "participant1",
+                                    "players": {"1132689": {"price": "1.91", "bookmakerOutcomeId": "1132689"}},
                                 },
                                 "b": {
-                                    "outcomeName": "TYLOO",
-                                    "players": {"0": {"price": "1.98", "bookmakerOutcomeId": "away"}},
+                                    "outcomeName": "participant2",
+                                    "players": {"1332262": {"price": "1.98", "bookmakerOutcomeId": "1332262"}},
                                 },
                             }
                         }

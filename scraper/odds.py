@@ -764,11 +764,18 @@ def _extract_outcomes(market: dict) -> list[dict]:
             if all(not isinstance(v, dict) for v in value.values()):
                 outcomes = []
                 for name, odd in value.items():
-                    outcomes.append({"name": str(name), "odds": odd})
+                    outcomes.append({"name": str(name), "odds": odd, "_outcome_key": str(name)})
                 return outcomes
             # Nested outcomes map payload: {"10166": {...}, "10167": {...}}
             if all(isinstance(v, dict) for v in value.values()):
-                return [item for item in value.values() if isinstance(item, dict)]
+                out = []
+                for outcome_key, item in value.items():
+                    if not isinstance(item, dict):
+                        continue
+                    copied = dict(item)
+                    copied["_outcome_key"] = str(outcome_key)
+                    out.append(copied)
+                return out
             return [value]
     # Flat map payload: {"marketKey": "h2h", "Team A": 1.9, "Team B": 2.0}
     outcomes = []
@@ -777,7 +784,7 @@ def _extract_outcomes(market: dict) -> list[dict]:
             continue
         odd = _safe_float(value)
         if odd > 1.0:
-            outcomes.append({"name": str(key), "odds": odd})
+            outcomes.append({"name": str(key), "odds": odd, "_outcome_key": str(key)})
     return outcomes
 
 
@@ -814,6 +821,7 @@ def _resolve_outcome_side(outcome: dict, fixture: dict) -> str:
             outcome.get("name", outcome.get("label", outcome.get("selection", ""))),
         )
     )
+    outcome_key = _normalize_team_name(outcome.get("_outcome_key", ""))
 
     token = _normalize_team_name(
         outcome.get(
@@ -840,6 +848,8 @@ def _resolve_outcome_side(outcome: dict, fixture: dict) -> str:
 
     home_norm = _normalize_team_name(fixture.get("home_name", ""))
     away_norm = _normalize_team_name(fixture.get("away_name", ""))
+    home_id_norm = _normalize_team_name(fixture.get("home_id", ""))
+    away_id_norm = _normalize_team_name(fixture.get("away_id", ""))
     if home_norm and token == home_norm:
         return "home"
     if away_norm and token == away_norm:
@@ -847,6 +857,14 @@ def _resolve_outcome_side(outcome: dict, fixture: dict) -> str:
     if home_norm and outcome_name == home_norm:
         return "home"
     if away_norm and outcome_name == away_norm:
+        return "away"
+    if home_id_norm and token == home_id_norm:
+        return "home"
+    if away_id_norm and token == away_id_norm:
+        return "away"
+    if home_id_norm and outcome_key == home_id_norm:
+        return "home"
+    if away_id_norm and outcome_key == away_id_norm:
         return "away"
 
     competitor = outcome.get("competitor", outcome.get("team"))
@@ -859,16 +877,24 @@ def _resolve_outcome_side(outcome: dict, fixture: dict) -> str:
 
     players = outcome.get("players")
     if isinstance(players, dict):
-        for _, player in players.items():
+        for player_key, player in players.items():
             if not isinstance(player, dict):
                 continue
             player_name = _normalize_team_name(
                 player.get("name", player.get("outcomeName", player.get("label", "")))
             )
             player_token = _normalize_team_name(player.get("bookmakerOutcomeId", ""))
+            player_id = _normalize_team_name(
+                player.get("id", player.get("participantId", player.get("teamId", "")))
+            )
+            player_key_norm = _normalize_team_name(player_key)
             if home_norm and (player_name == home_norm or player_token in {"home", "team1", "101"}):
                 return "home"
             if away_norm and (player_name == away_norm or player_token in {"away", "team2", "103"}):
+                return "away"
+            if home_id_norm and (player_token == home_id_norm or player_id == home_id_norm or player_key_norm == home_id_norm):
+                return "home"
+            if away_id_norm and (player_token == away_id_norm or player_id == away_id_norm or player_key_norm == away_id_norm):
                 return "away"
 
     return ""
@@ -953,6 +979,8 @@ def _normalize_fixture_payload(item: dict) -> dict | None:
     away_name = _extract_team_name(item, "away")
     home_name = home_name or _safe_str(item.get("participant1Name", item.get("team1Name", "")))
     away_name = away_name or _safe_str(item.get("participant2Name", item.get("team2Name", "")))
+    home_id = _safe_str(item.get("participant1Id", item.get("team1Id", item.get("homeId", ""))))
+    away_id = _safe_str(item.get("participant2Id", item.get("team2Id", item.get("awayId", ""))))
 
     if not home_name or not away_name:
         participants = item.get("participants", item.get("teams", item.get("opponents", [])))
@@ -996,6 +1024,8 @@ def _normalize_fixture_payload(item: dict) -> dict | None:
         "fixture_id": fixture_id,
         "home_name": home_name,
         "away_name": away_name,
+        "home_id": home_id,
+        "away_id": away_id,
         "start_dt": _ensure_utc(start_dt),
         "event_name": event_name,
     }
