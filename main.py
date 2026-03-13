@@ -112,45 +112,62 @@ async def analyze_upcoming(
     filtered_low_confidence = 0
     filtered_low_value = 0
     filtered_stale_odds = 0
+    odds_filtered_started = 0
+    odds_filtered_low_data = 0
+    odds_filtered_low_confidence = 0
+    odds_filtered_low_value = 0
+    odds_filtered_stale = 0
 
     model_cfg = config.get("model", {})
     odds_cfg = config.get("odds", {})
 
     top_bets_count = max(1, int(model_cfg.get("top_bets_count", 5)))
     min_minutes_before_match = max(0, int(model_cfg.get("min_minutes_before_match", 5)))
-    min_confidence_filter = max(0.0, float(model_cfg.get("min_confidence", 70.0)))
-    if bool(model_cfg.get("confidence_auto_tune", True)):
-        tuned_conf = float(getattr(predictor, "min_confidence", 0.0))
-        if tuned_conf > 0:
-            # Auto-tune do treino define o threshold efetivo da inferencia.
-            min_confidence_filter = tuned_conf
-    min_value_filter = max(0.0, float(model_cfg.get("min_value_pct", 8.0)))
-    min_recent_matches = max(0, int(model_cfg.get("live_min_recent_matches", 5)))
+    live_thresholds = _resolve_live_thresholds(model_cfg, predictor)
+    min_confidence_filter = live_thresholds["min_confidence"]
+    min_value_filter = live_thresholds["min_value"]
+    synthetic_min_confidence_filter = live_thresholds["synthetic_min_confidence"]
+    synthetic_min_value_filter = live_thresholds["synthetic_min_value"]
+    min_recent_matches = max(0, int(model_cfg.get("live_min_recent_matches", 2)))
     form_window_days = max(1, int(model_cfg.get("form_window_days", 365)))
     max_pick_odds_age_minutes = max(1, int(odds_cfg.get("max_pick_odds_age_minutes", 120)))
 
     now_dt = datetime.now()
     min_start_cutoff = datetime.now() + timedelta(minutes=min_minutes_before_match)
     approved_candidates: list[dict] = []
-    candidates_with_odds = 0
-    total_upcoming_with_odds = sum(
+    with_odds_analyzed = 0
+    with_odds_approved = 0
+    with_odds_before_filters = sum(
         1
         for m in upcoming
         if _safe_float(m.get("odds_team1")) > 1.0 and _safe_float(m.get("odds_team2")) > 1.0
     )
     logger.info(
-        "[ANALYSIS] Filtros ativos: min_conf=%.1f min_value=%.1f min_recent=%s odds_age<=%smin | com_odds_no_banco=%s",
+        "[ANALYSIS] Filtros ativos: min_conf=%.1f min_value=%.1f synthetic(min_conf=%.1f min_value=%.1f) "
+        "min_recent=%s odds_age<=%smin | com_odds_no_banco=%s",
         min_confidence_filter,
         min_value_filter,
+        synthetic_min_confidence_filter,
+        synthetic_min_value_filter,
         min_recent_matches,
         max_pick_odds_age_minutes,
-        total_upcoming_with_odds,
+        with_odds_before_filters,
     )
 
     for match in upcoming:
+        has_valid_odds = (
+            _safe_float(match.get("odds_team1")) > 1.0
+            and _safe_float(match.get("odds_team2")) > 1.0
+        )
+        is_synthetic_match = _is_synthetic_match(match)
+        match_confidence_filter = synthetic_min_confidence_filter if is_synthetic_match else min_confidence_filter
+        match_value_filter = synthetic_min_value_filter if is_synthetic_match else min_value_filter
+
         match_dt = _parse_datetime(match.get("date"))
         if match_dt and match_dt <= min_start_cutoff:
             filtered_started += 1
+            if has_valid_odds:
+                odds_filtered_started += 1
             continue
 
         if not _has_min_recent_data(
@@ -160,12 +177,16 @@ async def analyze_upcoming(
             form_window_days=form_window_days,
         ):
             filtered_low_data += 1
+            if has_valid_odds:
+                odds_filtered_low_data += 1
             continue
 
         features = features_ext.extract(match)
         if not features:
             skipped_no_features += 1
             filtered_low_data += 1
+            if has_valid_odds:
+                odds_filtered_low_data += 1
             continue
 
         prediction = predictor.predict(features)
@@ -192,12 +213,8 @@ async def analyze_upcoming(
                 "odds_team2": match.get("odds_team2"),
             }
 
-        has_valid_odds = (
-            _safe_float(match.get("odds_team1")) > 1.0
-            and _safe_float(match.get("odds_team2")) > 1.0
-        )
         if has_valid_odds:
-            candidates_with_odds += 1
+            with_odds_analyzed += 1
 
         best_vb = _best_value_bet(analysis)
         pick_meta = _build_pick_meta(match, prediction, best_vb)
@@ -221,21 +238,29 @@ async def analyze_upcoming(
         )
 
         confidence = float(prediction.get("confidence", 0.0))
-        if confidence < min_confidence_filter:
+        if confidence < match_confidence_filter:
             filtered_low_confidence += 1
+            if has_valid_odds:
+                odds_filtered_low_confidence += 1
             continue
 
         if not best_vb:
             filtered_low_value += 1
+            if has_valid_odds:
+                odds_filtered_low_value += 1
             continue
 
         value_pct = float(best_vb.get("value_pct", 0.0))
-        if value_pct < min_value_filter:
+        if value_pct < match_value_filter:
             filtered_low_value += 1
+            if has_valid_odds:
+                odds_filtered_low_value += 1
             continue
 
         if not _is_odds_fresh(match.get("odds_updated_at"), max_pick_odds_age_minutes, now_dt):
             filtered_stale_odds += 1
+            if has_valid_odds:
+                odds_filtered_stale += 1
             continue
 
         score = _score_bet_candidate(prediction, best_vb)
@@ -257,6 +282,8 @@ async def analyze_upcoming(
         }
         approved_candidates.append(candidate)
         value_count += 1
+        if has_valid_odds:
+            with_odds_approved += 1
 
         logger.info(
             "  %s (%s%%) vs %s (%s%%) | confianca=%s%% | pick=%s | score=%.2f",
@@ -279,7 +306,7 @@ async def analyze_upcoming(
             picks=top_picks,
             requested_top=top_bets_count,
             total_candidates=analyzed,
-            candidates_with_odds=candidates_with_odds,
+            candidates_with_odds=with_odds_analyzed,
         )
         if capture.get("created"):
             logger.info(
@@ -299,28 +326,48 @@ async def analyze_upcoming(
         top_picks,
         total_candidates=analyzed,
         requested_top=top_bets_count,
-        candidates_with_odds=candidates_with_odds,
+        candidates_with_odds=with_odds_analyzed,
     )
     if top_picks:
         logger.info(
             "[ANALYSIS] Top %s enviados (%s candidatos totais, %s com odds, %s value)",
             len(top_picks),
             analyzed,
-            candidates_with_odds,
+            with_odds_analyzed,
             len(approved_candidates),
         )
     else:
         logger.info(
             "[ANALYSIS] Sem oportunidades de value no ciclo (%s candidatos, %s com odds)",
             analyzed,
-            candidates_with_odds,
+            with_odds_analyzed,
         )
-        if total_upcoming_with_odds > 0 and candidates_with_odds == 0:
+        if with_odds_before_filters > 0 and with_odds_approved == 0:
             logger.warning(
-                "[ANALYSIS] Odds existem no banco (%s), mas nenhum candidato com odds passou pelos filtros. "
-                "Revise min_recent/live e politica de sinteticos no live.",
-                total_upcoming_with_odds,
+                "[ANALYSIS] Odds existem no banco (%s), mas 0 picks com odds foram aprovadas "
+                "(analisadas_com_odds=%s | started=%s low_data=%s low_conf=%s low_value=%s stale=%s).",
+                with_odds_before_filters,
+                with_odds_analyzed,
+                odds_filtered_started,
+                odds_filtered_low_data,
+                odds_filtered_low_confidence,
+                odds_filtered_low_value,
+                odds_filtered_stale,
             )
+
+    logger.info(
+        "[ANALYSIS][ODDS] with_odds_before_filters=%s with_odds_analyzed=%s with_odds_approved=%s "
+        "(odds_filtered_started=%s, odds_filtered_low_data=%s, odds_filtered_low_confidence=%s, "
+        "odds_filtered_low_value=%s, odds_filtered_stale=%s)",
+        with_odds_before_filters,
+        with_odds_analyzed,
+        with_odds_approved,
+        odds_filtered_started,
+        odds_filtered_low_data,
+        odds_filtered_low_confidence,
+        odds_filtered_low_value,
+        odds_filtered_stale,
+    )
 
     logger.info(
         "[ANALYSIS] %s partidas analisadas, %s picks aprovadas "
@@ -370,6 +417,39 @@ def _best_value_bet(analysis: dict | None) -> dict | None:
     )
 
 
+def _resolve_live_thresholds(model_cfg: dict, predictor: Predictor | None = None) -> dict[str, float]:
+    """
+    Resolve thresholds efetivos de confianca/value para inferencia ao vivo.
+
+    Regras:
+    - Usa valores explicitos do config quando presentes.
+    - Auto-tune entra apenas quando `min_confidence` nao foi definido explicitamente.
+    - Partidas com time sintetico usam piso mais rigoroso.
+    """
+    min_conf_cfg_explicit = "min_confidence" in model_cfg
+    base_conf = max(0.0, float(model_cfg.get("min_confidence", 62.0)))
+    if bool(model_cfg.get("confidence_auto_tune", True)) and not min_conf_cfg_explicit and predictor is not None:
+        tuned_conf = float(getattr(predictor, "min_confidence", 0.0))
+        if tuned_conf > 0:
+            base_conf = tuned_conf
+
+    base_value = max(0.0, float(model_cfg.get("min_value_pct", 6.0)))
+    synthetic_conf = max(
+        base_conf,
+        float(model_cfg.get("synthetic_live_min_confidence", 68.0)),
+    )
+    synthetic_value = max(
+        base_value,
+        float(model_cfg.get("synthetic_live_min_value_pct", 7.0)),
+    )
+    return {
+        "min_confidence": base_conf,
+        "min_value": base_value,
+        "synthetic_min_confidence": synthetic_conf,
+        "synthetic_min_value": synthetic_value,
+    }
+
+
 def _safe_float(value) -> float:
     try:
         return float(str(value).replace(",", "."))
@@ -401,6 +481,12 @@ def _parse_datetime(value) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _is_synthetic_match(match: dict) -> bool:
+    team1_id = int(match.get("team1_id", 0) or 0)
+    team2_id = int(match.get("team2_id", 0) or 0)
+    return team1_id <= 0 or team2_id <= 0
 
 
 def _build_pick_meta(match: dict, prediction: dict, best_vb: dict | None) -> dict:

@@ -65,11 +65,11 @@ model:
   # Minimo de partidas do time pra considerar nas features
   min_matches: 0
   # Minimo de jogos recentes por time na inferencia ao vivo
-  live_min_recent_matches: 5
+  live_min_recent_matches: 2
   # Minimo de jogos recentes por time no treino
   train_min_recent_matches: 0
   # Filtros conservadores de qualidade
-  exclude_synthetic_teams_live: true
+  exclude_synthetic_teams_live: false
   exclude_synthetic_teams_train: false
   exclude_academy_teams_live: true
   exclude_academy_teams_train: false
@@ -97,9 +97,12 @@ model:
   low_data_rank_blend: 0.35
   rank_prior_scale: 12.0
   # Minimo de value (%) pra disparar alerta
-  min_value_pct: 8.0
+  min_value_pct: 6.0
   # Confianca minima do modelo (%) pra considerar
-  min_confidence: 70.0
+  min_confidence: 62.0
+  # Thresholds mais rigidos para partidas com pelo menos um time sintetico
+  synthetic_live_min_confidence: 68.0
+  synthetic_live_min_value_pct: 7.0
   # Quantidade de melhores partidas para ranking por ciclo
   top_bets_count: 3
   # Ignora partidas que comecam em ate X minutos (ou que ja iniciaram)
