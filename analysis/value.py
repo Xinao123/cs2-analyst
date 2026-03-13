@@ -9,6 +9,7 @@ A lógica:
 
 import logging
 import math
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,8 @@ class ValueDetector:
             "predicted_winner": prediction["predicted_winner"],
             "has_value": False,
             "value_bets": [],
+            "odds_team1": odds_team1,
+            "odds_team2": odds_team2,
         }
 
         # Sem odds = só mostra predição, sem value bet
@@ -147,6 +150,7 @@ class ValueDetector:
         lines = [
             f"📊 {t1_name} vs {t2_name}",
             f"🏆 {event}" if event else "",
+            f"🗓️ {self._format_match_datetime(match.get('date'))}",
             f"🎮 BO{bo}",
             f"",
             f"📈 Probabilidades do modelo:",
@@ -154,6 +158,17 @@ class ValueDetector:
             f"   {t2_name}: {analysis['team2_win_prob']:.1f}%",
             f"   Confiança: {analysis['confidence']:.1f}%",
         ]
+
+        o1 = analysis.get("odds_team1")
+        o2 = analysis.get("odds_team2")
+        lines.extend(
+            [
+                "",
+                "📉 Odds de mercado:",
+                f"   {t1_name}: {self._format_odds(o1)}",
+                f"   {t2_name}: {self._format_odds(o2)}",
+            ]
+        )
 
         if analysis["value_bets"]:
             lines.append("")
@@ -170,9 +185,51 @@ class ValueDetector:
                 ])
         else:
             lines.append("")
-            lines.append("❌ Sem value detectado nas odds atuais")
+            if not o1 and not o2:
+                lines.append("ℹ️ Odds indisponíveis no momento")
+            else:
+                lines.append("❌ Sem value detectado nas odds atuais")
 
         return "\n".join(line for line in lines if line is not None)
+
+    def _format_odds(self, odds: float | None) -> str:
+        if odds is None:
+            return "N/D"
+        try:
+            value = float(odds)
+            if value <= 1.0:
+                return "N/D"
+            return f"{value:.2f}"
+        except (TypeError, ValueError):
+            return "N/D"
+
+    def _format_match_datetime(self, value) -> str:
+        if not value:
+            return "Data indefinida"
+
+        text = str(value).strip()
+        if not text:
+            return "Data indefinida"
+
+        parsed = None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+        except ValueError:
+            pass
+
+        if parsed is None:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    continue
+
+        if parsed is None:
+            return text
+        return parsed.strftime("%d/%m/%Y %H:%M")
 
 
 def _expected_value(prob: float, odds: float, stake: float) -> float:

@@ -123,8 +123,8 @@ async def analyze_upcoming(
         # Quando tiver integração com API de odds, passa aqui
         analysis = value_detector.analyze(
             prediction=prediction,
-            odds_team1=None,  # TODO: integrar API de odds
-            odds_team2=None,
+            odds_team1=match.get("odds_team1"),
+            odds_team2=match.get("odds_team2"),
             match=match,
         )
 
