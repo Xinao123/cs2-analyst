@@ -1078,7 +1078,9 @@ class HLTVScraper:
                 break
             if not bootstrap:
                 break
-            if bool(cursor.get("completed")):
+            # Em bootstrap processamos todas as janelas montadas previamente.
+            # `cursor.completed` pode estar True desde a montagem e não deve encerrar aqui.
+            if (not bootstrap) and bool(cursor.get("completed")):
                 break
 
         report["discarded"] = max(_safe_int(report["returned"]) - _safe_int(report["saved"]), 0)

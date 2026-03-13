@@ -111,6 +111,17 @@ class PandaScoreHistoryTests(unittest.TestCase):
         self.assertTrue(self.scraper._consume_history_quota())
         self.assertFalse(self.scraper._consume_history_quota())
 
+    def test_bootstrap_processes_multiple_windows(self):
+        self.scraper.pandascore_history_months = 2
+        self.scraper.pandascore_history_window_days = 7
+        with patch.object(
+            self.scraper,
+            "_fetch_pandascore_history_page",
+            return_value=([], "", 1),
+        ):
+            report = self.scraper.sync_pandascore_history(bootstrap=True, force_full=True)
+        self.assertGreaterEqual(report["windows_processed"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
