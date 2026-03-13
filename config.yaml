@@ -42,6 +42,8 @@ odds:
   market: "h2h"
   refresh_minutes: 10
   match_window_hours: 6
+  # false = sincroniza odds apenas no inicio de cada ciclo principal
+  sync_during_wait: false
   timeout_sec: 15
   retry_count: 3
   retry_backoff_sec: 2

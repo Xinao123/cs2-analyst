@@ -493,9 +493,11 @@ async def run(config: dict, once: bool = False):
 
     interval = config.get("scheduler", {}).get("scan_interval", 60) * 60  # em segundos
     daily_hour = config.get("scheduler", {}).get("daily_update_hour", 6)
+    odds_cfg = config.get("odds", {})
+    odds_sync_during_wait = bool(odds_cfg.get("sync_during_wait", False))
     next_odds_sync_at = (
         time.time() + odds_sync.refresh_seconds
-        if odds_sync.enabled
+        if odds_sync.enabled and odds_sync_during_wait
         else float("inf")
     )
     next_audit_probe_at = time.time()
@@ -544,7 +546,8 @@ async def run(config: dict, once: bool = False):
 
             # Atualiza odds reais antes da analise (uma vez no --once e a cada ciclo normal)
             if odds_sync.enabled:
-                next_odds_sync_at = time.time() + odds_sync.refresh_seconds
+                if odds_sync_during_wait:
+                    next_odds_sync_at = time.time() + odds_sync.refresh_seconds
                 await asyncio.to_thread(odds_sync.sync_upcoming_odds)
 
             # Analisa partidas futuras
@@ -571,7 +574,7 @@ async def run(config: dict, once: bool = False):
         for _ in range(interval):
             if not _running:
                 break
-            if odds_sync.enabled and time.time() >= next_odds_sync_at:
+            if odds_sync.enabled and odds_sync_during_wait and time.time() >= next_odds_sync_at:
                 next_odds_sync_at = time.time() + odds_sync.refresh_seconds
                 await asyncio.to_thread(odds_sync.sync_upcoming_odds)
             if daily_auditor.enabled and time.time() >= next_audit_probe_at:
