@@ -980,23 +980,47 @@ class HLTVScraper:
         if bool(cursor.get("completed")) and not bootstrap and not force_full:
             windows.append((now_utc - timedelta(days=self.pandascore_history_window_days), now_utc))
         else:
-            while True:
-                next_window = self._next_history_window(cursor, floor_dt)
-                if not next_window:
-                    cursor["completed"] = True
-                    break
+            next_window = self._next_history_window(cursor, floor_dt)
+            if not next_window:
+                cursor["completed"] = True
+            elif not bootstrap:
                 windows.append(next_window)
-                if not bootstrap:
-                    break
-                # Bootstrap one-shot: processa ate quota ou fim da janela.
-                if len(windows) >= 10_000:
-                    break
+            else:
+                # Bootstrap one-shot: monta janelas retroativas sem repetir cursor.
+                # Limite de seguranca para evitar loops longos em caso de dados inesperados.
+                max_windows = max(8, int((self.pandascore_history_months * 30) / self.pandascore_history_window_days) + 4)
+                temp_end = next_window[1]
+                for _ in range(max_windows):
+                    start_dt = temp_end - timedelta(days=self.pandascore_history_window_days)
+                    if start_dt < floor_dt:
+                        start_dt = floor_dt
+                    if start_dt >= temp_end:
+                        cursor["completed"] = True
+                        break
+                    windows.append((start_dt, temp_end))
+                    temp_end = start_dt
+                    if start_dt <= floor_dt:
+                        cursor["completed"] = True
+                        break
 
+        if windows:
+            logger.info(
+                "[HISTORY][pandascore] processando %s janela(s) (bootstrap=%s)",
+                len(windows),
+                bootstrap,
+            )
         for window_start, window_end in windows:
             report["windows_processed"] += 1
             seen_match_ids: set[int] = set()
             page = 1
             stop_window = False
+            logger.info(
+                "[HISTORY][pandascore] janela %s/%s: %s -> %s",
+                report["windows_processed"],
+                len(windows),
+                window_start.isoformat(timespec="seconds"),
+                window_end.isoformat(timespec="seconds"),
+            )
 
             while True:
                 page_items, page_error, requests_used = self._fetch_pandascore_history_page(
@@ -1030,6 +1054,15 @@ class HLTVScraper:
 
                 if len(page_items) < self.pandascore_history_per_page:
                     break
+                if page % 5 == 0:
+                    logger.info(
+                        "[HISTORY][pandascore] progresso janela %s: pagina=%s retornadas=%s salvas=%s requests=%s",
+                        report["windows_processed"],
+                        page,
+                        report["returned"],
+                        report["saved"],
+                        report["requests_used"],
+                    )
                 page += 1
 
             cursor["next_end"] = window_start.isoformat(timespec="seconds")
