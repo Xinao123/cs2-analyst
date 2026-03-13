@@ -464,16 +464,53 @@ def train_model(db: Database, config: dict, notifier: Notifier) -> dict:
 
     logger.info("[TRAIN] Extraindo features...")
     features_list, labels, match_dates = features_ext.extract_training_data(include_dates=True)
+    stats = getattr(features_ext, "last_training_stats", {}) or {}
+    if stats:
+        logger.info(
+            "[TRAIN] Dataset: bruto=%s validas=%s descartadas=%s "
+            "(synthetic=%s, academy=%s, invalid_label=%s, low_data=%s)",
+            stats.get("total_raw", 0),
+            stats.get("total_valid", 0),
+            stats.get("discarded_total", 0),
+            stats.get("discarded_synthetic", 0),
+            stats.get("discarded_academy", 0),
+            stats.get("discarded_invalid_label", 0),
+            stats.get("discarded_low_data", 0),
+        )
+        logger.info(
+            "[TRAIN] Classes: team1=%s team2=%s | synth_policy(train=%s, live=%s)",
+            stats.get("class_team1", 0),
+            stats.get("class_team2", 0),
+            stats.get("exclude_synthetic_train", True),
+            stats.get("exclude_synthetic_live", True),
+        )
+        if not bool(stats.get("exclude_synthetic_train", True)):
+            logger.info("[TRAIN] Modo relaxed-train ativo: times sinteticos permitidos no treino.")
 
     if len(features_list) < 20:
-        logger.error(f"[TRAIN] Dados insuficientes: {len(features_list)} amostras")
-        return {}
+        reason = f"dados_insuficientes:{len(features_list)}"
+        logger.warning("[TRAIN] Treino ignorado (%s). Mantendo modelo atual.", reason)
+        return {
+            "skipped": True,
+            "reason": reason,
+            "samples": len(features_list),
+        }
 
     logger.info("[TRAIN] Treinando modelo...")
     metrics = predictor.train(features_list, labels, match_dates=match_dates)
 
-    if "error" not in metrics:
-        notifier.model_trained(metrics)
+    if "error" in metrics:
+        logger.warning(
+            "[TRAIN] Treino nao atualizado (%s). Mantendo modelo atual.",
+            metrics.get("error", "erro_desconhecido"),
+        )
+        return {
+            "skipped": True,
+            "reason": metrics.get("error", "erro_desconhecido"),
+            "samples": len(features_list),
+        }
+
+    notifier.model_trained(metrics)
 
     return metrics
 
@@ -533,7 +570,7 @@ async def run(config: dict, once: bool = False):
                 stats = db.get_stats()
                 if stats["completed_matches"] >= 50:
                     metrics = train_model(db, config, notifier)
-                    if metrics and "error" not in metrics:
+                    if metrics and not metrics.get("skipped") and "error" not in metrics:
                         predictor = Predictor(config)
 
             # Busca partidas futuras e resultados novos
@@ -624,7 +661,10 @@ def main():
         db = Database(config["database"]["path"])
         notifier = Notifier(config)
         metrics = train_model(db, config, notifier)
-        if metrics and "error" not in metrics:
+        if metrics and metrics.get("skipped"):
+            print(f"\n⚠️ Treino ignorado: {metrics.get('reason', 'motivo_desconhecido')}")
+            print("   Modelo atual foi mantido.")
+        elif metrics and "error" not in metrics:
             print(f"\nâœ… Modelo treinado: {metrics['model']}")
             print(f"   CV Accuracy: {metrics['cv_accuracy']:.1f}%")
             print(f"   Train Accuracy: {metrics['train_accuracy']:.1f}%")

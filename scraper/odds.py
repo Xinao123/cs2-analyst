@@ -179,7 +179,7 @@ class OddsPapiSync:
                 if _payload_has_any_price(odds_payload):
                     report["reasons"]["payload_invalido"] += 1
                     if payload_invalid_logged < 3:
-                        logger.info(
+                        logger.debug(
                             "[ODDS][oddspapi] payload sem quotes fixture=%s shape=%s",
                             fixture_id,
                             _payload_shape_summary(odds_payload),

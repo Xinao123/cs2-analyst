@@ -61,7 +61,8 @@ model:
   # Minimo de jogos recentes por time no treino
   train_min_recent_matches: 0
   # Filtros conservadores de qualidade
-  exclude_synthetic_teams: true
+  exclude_synthetic_teams_live: true
+  exclude_synthetic_teams_train: false
   exclude_academy_teams: true
   # Evita leakage de roster em treino sem historico temporal de jogadores
   use_player_features: false

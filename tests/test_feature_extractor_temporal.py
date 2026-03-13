@@ -17,7 +17,8 @@ class FeatureExtractorTemporalTests(unittest.TestCase):
                 "live_min_recent_matches": 0,
                 "train_min_recent_matches": 0,
                 "use_player_features": False,
-                "exclude_synthetic_teams": True,
+                "exclude_synthetic_teams_live": True,
+                "exclude_synthetic_teams_train": False,
                 "exclude_academy_teams": True,
             }
         }
@@ -25,6 +26,7 @@ class FeatureExtractorTemporalTests(unittest.TestCase):
 
         self.db.upsert_team(1, "Alpha", ranking=10)
         self.db.upsert_team(2, "Beta", ranking=20)
+        self.db.upsert_team(-9000000001, "Synthetic Alpha", ranking=9999)
 
     def tearDown(self):
         self.tmpdir.cleanup()
@@ -66,7 +68,7 @@ class FeatureExtractorTemporalTests(unittest.TestCase):
         self.assertEqual(1, int(feats["team1_matches_played"]))
         self.assertEqual(1, int(feats["team2_matches_played"]))
 
-    def test_extract_filters_synthetic_teams_when_enabled(self):
+    def test_extract_filters_synthetic_teams_on_live_when_enabled(self):
         match = {
             "team1_id": -9000000001,
             "team2_id": 2,
@@ -77,6 +79,37 @@ class FeatureExtractorTemporalTests(unittest.TestCase):
         }
         feats = self.fx.extract(match, min_recent_matches=0)
         self.assertIsNone(feats)
+
+    def test_extract_allows_synthetic_teams_on_training_when_disabled(self):
+        match = {
+            "team1_id": -9000000001,
+            "team2_id": 2,
+            "date": "2026-03-11 10:00:00",
+            "best_of": 1,
+            "event_tier": 3,
+            "is_lan": 0,
+        }
+        feats = self.fx.extract(
+            match,
+            min_recent_matches=0,
+            as_of_date=match["date"],
+            for_training=True,
+        )
+        self.assertIsNotNone(feats)
+
+    def test_legacy_config_fallback_applies_to_train_and_live(self):
+        legacy_cfg = {
+            "model": {
+                "form_window_days": 365,
+                "live_min_recent_matches": 0,
+                "train_min_recent_matches": 0,
+                "exclude_synthetic_teams": False,
+                "exclude_academy_teams": True,
+            }
+        }
+        fx_legacy = FeatureExtractor(self.db, legacy_cfg)
+        self.assertFalse(fx_legacy.exclude_synthetic_teams_live)
+        self.assertFalse(fx_legacy.exclude_synthetic_teams_train)
 
     def test_extract_filters_academy_teams_when_enabled(self):
         self.db.upsert_team(3, "NAVI Junior", ranking=30)

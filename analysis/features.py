@@ -30,8 +30,28 @@ class FeatureExtractor:
         self.live_min_recent_matches = model_cfg.get("live_min_recent_matches", 3)
         self.train_min_recent_matches = model_cfg.get("train_min_recent_matches", 0)
         self.use_player_features = bool(model_cfg.get("use_player_features", False))
-        self.exclude_synthetic_teams = bool(model_cfg.get("exclude_synthetic_teams", True))
+        # Compat: chave antiga `exclude_synthetic_teams` vira fallback para live+train.
+        legacy_synth = model_cfg.get("exclude_synthetic_teams")
+        if legacy_synth is not None:
+            if "exclude_synthetic_teams_live" not in model_cfg or "exclude_synthetic_teams_train" not in model_cfg:
+                logger.warning(
+                    "[FEATURES] Config legado `exclude_synthetic_teams` detectado; "
+                    "use `exclude_synthetic_teams_live` e `exclude_synthetic_teams_train`."
+                )
+        self.exclude_synthetic_teams_live = bool(
+            model_cfg.get(
+                "exclude_synthetic_teams_live",
+                legacy_synth if legacy_synth is not None else True,
+            )
+        )
+        self.exclude_synthetic_teams_train = bool(
+            model_cfg.get(
+                "exclude_synthetic_teams_train",
+                legacy_synth if legacy_synth is not None else True,
+            )
+        )
         self.exclude_academy_teams = bool(model_cfg.get("exclude_academy_teams", True))
+        self.last_training_stats: dict = {}
 
     def extract(
         self,
@@ -55,7 +75,8 @@ class FeatureExtractor:
         t1_id = int(match["team1_id"])
         t2_id = int(match["team2_id"])
 
-        if self.exclude_synthetic_teams and (t1_id <= 0 or t2_id <= 0):
+        exclude_synthetic = self.exclude_synthetic_teams_train if for_training else self.exclude_synthetic_teams_live
+        if exclude_synthetic and (t1_id <= 0 or t2_id <= 0):
             return None
 
         t1 = self.db.get_team(t1_id)
@@ -216,6 +237,7 @@ class FeatureExtractor:
         skipped_synthetic = 0
         skipped_academy = 0
         skipped_invalid_label = 0
+        skipped_low_data = 0
         match_dates: list[str] = []
 
         for row in rows:
@@ -224,7 +246,7 @@ class FeatureExtractor:
             team2_id = int(match.get("team2_id", 0) or 0)
             winner_id = int(match.get("winner_id", 0) or 0)
 
-            if self.exclude_synthetic_teams and (team1_id <= 0 or team2_id <= 0):
+            if self.exclude_synthetic_teams_train and (team1_id <= 0 or team2_id <= 0):
                 skipped += 1
                 skipped_synthetic += 1
                 continue
@@ -251,6 +273,7 @@ class FeatureExtractor:
             )
             if feats is None:
                 skipped += 1
+                skipped_low_data += 1
                 continue
 
             label = 1 if winner_id == team1_id else 0
@@ -258,10 +281,30 @@ class FeatureExtractor:
             labels.append(label)
             match_dates.append(str(match.get("date", "")))
 
+        class_t1 = int(sum(1 for y in labels if y == 1))
+        class_t2 = int(sum(1 for y in labels if y == 0))
+        self.last_training_stats = {
+            "total_raw": len(rows),
+            "total_valid": len(features_list),
+            "discarded_total": skipped,
+            "discarded_synthetic": skipped_synthetic,
+            "discarded_academy": skipped_academy,
+            "discarded_invalid_label": skipped_invalid_label,
+            "discarded_low_data": skipped_low_data,
+            "class_team1": class_t1,
+            "class_team2": class_t2,
+            "min_recent_train": int(self.train_min_recent_matches),
+            "exclude_synthetic_train": bool(self.exclude_synthetic_teams_train),
+            "exclude_synthetic_live": bool(self.exclude_synthetic_teams_live),
+        }
         logger.info(
             f"[FEATURES] {len(features_list)} amostras extraidas de {len(rows)} partidas "
-            f"(descartadas: {skipped}, min_recent_train={self.train_min_recent_matches}, "
-            f"sinteticos={skipped_synthetic}, academy={skipped_academy}, invalid_label={skipped_invalid_label})"
+            f"(descartadas={skipped}, sinteticos={skipped_synthetic}, academy={skipped_academy}, "
+            f"invalid_label={skipped_invalid_label}, low_data={skipped_low_data}, "
+            f"classes_t1={class_t1}, classes_t2={class_t2}, "
+            f"min_recent_train={self.train_min_recent_matches}, "
+            f"exclude_synth_train={self.exclude_synthetic_teams_train}, "
+            f"exclude_synth_live={self.exclude_synthetic_teams_live})"
         )
         if include_dates:
             return features_list, labels, match_dates
