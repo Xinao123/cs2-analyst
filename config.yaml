@@ -73,6 +73,8 @@ model:
   min_confidence: 55.0
   # Quantidade de melhores partidas para ranking por ciclo
   top_bets_count: 5
+  # Ignora partidas que comecam em ate X minutos (ou que ja iniciaram)
+  min_minutes_before_match: 5
 
 # Gestao de banca
 bankroll:

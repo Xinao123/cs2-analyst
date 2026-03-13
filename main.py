@@ -25,7 +25,7 @@ import signal
 import asyncio
 import logging
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import yaml
 
@@ -107,12 +107,20 @@ async def analyze_upcoming(
     analyzed = 0
     skipped_no_features = 0
     skipped_no_prediction = 0
+    skipped_started = 0
     top_bets_count = max(1, int(config.get("model", {}).get("top_bets_count", 5)))
+    min_minutes_before_match = max(0, int(config.get("model", {}).get("min_minutes_before_match", 5)))
+    min_start_cutoff = datetime.now() + timedelta(minutes=min_minutes_before_match)
     candidates: list[dict] = []
     value_candidates: list[dict] = []
     candidates_with_odds = 0
 
     for match in upcoming:
+        match_dt = _parse_datetime(match.get("date"))
+        if match_dt and match_dt <= min_start_cutoff:
+            skipped_started += 1
+            continue
+
         features = features_ext.extract(match)
         if not features:
             skipped_no_features += 1
@@ -254,11 +262,13 @@ async def analyze_upcoming(
         )
 
     logger.info(
-        "[ANALYSIS] %s partidas analisadas, %s value bets (sem_features=%s, sem_pred=%s)",
+        "[ANALYSIS] %s partidas analisadas, %s value bets (sem_features=%s, sem_pred=%s, iniciadas=%s, cutoff=%smin)",
         analyzed,
         value_count,
         skipped_no_features,
         skipped_no_prediction,
+        skipped_started,
+        min_minutes_before_match,
     )
     return value_count
 
@@ -296,6 +306,32 @@ def _safe_float(value) -> float:
         return float(str(value).replace(",", "."))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _parse_datetime(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        pass
+
+    for date_fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(text, date_fmt)
+        except ValueError:
+            continue
+    return None
 
 
 async def update_data(db: Database, config: dict):
