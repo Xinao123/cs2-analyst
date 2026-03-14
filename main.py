@@ -796,8 +796,10 @@ async def run(config: dict, once: bool = False):
     daily_auditor = DailyTop5Auditor(db, config, notifier)
     history_scraper = HLTVScraper(db, config)
 
-    interval = config.get("scheduler", {}).get("scan_interval", 60) * 60  # em segundos
-    daily_hour = config.get("scheduler", {}).get("daily_update_hour", 6)
+    scheduler_cfg = config.get("scheduler", {})
+    interval = scheduler_cfg.get("scan_interval", 60) * 60  # em segundos
+    daily_hour = scheduler_cfg.get("daily_update_hour", 6)
+    auto_train_enabled = bool(scheduler_cfg.get("auto_train_enabled", False))
     odds_cfg = config.get("odds", {})
     scraper_cfg = config.get("scraper", {})
     odds_sync_during_wait = bool(odds_cfg.get("sync_during_wait", False))
@@ -851,12 +853,15 @@ async def run(config: dict, once: bool = False):
                         )
                     next_history_sync_at = time.time() + history_sync_seconds
 
-                # Re-treina modelo com dados novos
-                stats = db.get_stats()
-                if stats["completed_matches"] >= 50:
-                    metrics = train_model(db, config, notifier)
-                    if metrics and not metrics.get("skipped") and "error" not in metrics:
-                        predictor = Predictor(config)
+                # Re-treina modelo com dados novos (opcional por config)
+                if auto_train_enabled:
+                    stats = db.get_stats()
+                    if stats["completed_matches"] >= 50:
+                        metrics = train_model(db, config, notifier)
+                        if metrics and not metrics.get("skipped") and "error" not in metrics:
+                            predictor = Predictor(config)
+                else:
+                    logger.info("[TRAIN] Auto-train desabilitado; use --train para treinar manualmente.")
 
             if history_sync_enabled and time.time() >= next_history_sync_at:
                 history_report = await asyncio.to_thread(

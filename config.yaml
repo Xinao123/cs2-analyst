@@ -132,6 +132,8 @@ scheduler:
   display_timezone_label: "BRT (Brasília)"
   # Intervalo entre scans de partidas futuras (minutos)
   scan_interval: 15
+  # Treino automatico no ciclo diario (false = apenas manual via --train)
+  auto_train_enabled: false
   # Hora do scrape diario de stats (formato 24h)
   daily_update_hour: 6
   daily_top5_audit_enabled: true
