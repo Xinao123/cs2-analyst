@@ -1,6 +1,6 @@
 import unittest
 
-from main import _is_synthetic_match, _resolve_live_thresholds
+from main import _is_synthetic_match, _resolve_live_thresholds, _should_sync_odds
 
 
 class _PredictorStub:
@@ -9,7 +9,7 @@ class _PredictorStub:
 
 
 class MainLiveThresholdTests(unittest.TestCase):
-    def test_explicit_min_confidence_overrides_auto_tune(self):
+    def test_confidence_auto_tune_uses_max_between_config_and_tuned(self):
         cfg = {
             "min_confidence": 62.0,
             "min_value_pct": 6.0,
@@ -18,10 +18,19 @@ class MainLiveThresholdTests(unittest.TestCase):
             "synthetic_live_min_value_pct": 7.0,
         }
         thresholds = _resolve_live_thresholds(cfg, _PredictorStub(75.0))
-        self.assertEqual(62.0, thresholds["min_confidence"])
+        self.assertEqual(75.0, thresholds["min_confidence"])
         self.assertEqual(6.0, thresholds["min_value"])
-        self.assertEqual(68.0, thresholds["synthetic_min_confidence"])
+        self.assertEqual(75.0, thresholds["synthetic_min_confidence"])
         self.assertEqual(7.0, thresholds["synthetic_min_value"])
+
+    def test_confidence_auto_tune_keeps_config_when_tuned_lower(self):
+        cfg = {
+            "min_confidence": 62.0,
+            "min_value_pct": 6.0,
+            "confidence_auto_tune": True,
+        }
+        thresholds = _resolve_live_thresholds(cfg, _PredictorStub(60.0))
+        self.assertEqual(62.0, thresholds["min_confidence"])
 
     def test_auto_tune_used_when_min_confidence_not_explicit(self):
         cfg = {
@@ -38,6 +47,13 @@ class MainLiveThresholdTests(unittest.TestCase):
         self.assertTrue(_is_synthetic_match({"team1_id": -1, "team2_id": 10}))
         self.assertTrue(_is_synthetic_match({"team1_id": 10, "team2_id": 0}))
         self.assertFalse(_is_synthetic_match({"team1_id": 10, "team2_id": 20}))
+
+    def test_should_sync_odds_first_sync_runs_immediately(self):
+        self.assertTrue(_should_sync_odds(now_ts=100.0, last_sync_at=None, refresh_seconds=1800))
+
+    def test_should_sync_odds_respects_refresh_window(self):
+        self.assertFalse(_should_sync_odds(now_ts=1000.0, last_sync_at=100.0, refresh_seconds=1800))
+        self.assertTrue(_should_sync_odds(now_ts=1900.0, last_sync_at=100.0, refresh_seconds=1800))
 
 
 if __name__ == "__main__":

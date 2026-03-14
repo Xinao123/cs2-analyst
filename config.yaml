@@ -50,7 +50,7 @@ odds:
   token_env: "ODDSPAPI_API_KEY"
   sport_id: ""
   market: "h2h"
-  refresh_minutes: 10
+  refresh_minutes: 30
   match_window_hours: 6
   # false = sincroniza odds apenas no inicio de cada ciclo principal
   sync_during_wait: false
@@ -108,7 +108,7 @@ model:
   # Quantidade de melhores partidas para ranking por ciclo
   top_bets_count: 3
   # Ignora partidas que comecam em ate X minutos (ou que ja iniciaram)
-  min_minutes_before_match: 5
+  min_minutes_before_match: 10
 
 # Gestao de banca
 bankroll:
@@ -121,7 +121,7 @@ scheduler:
   timezone: "America/Sao_Paulo"
   display_timezone_label: "BRT (Brasília)"
   # Intervalo entre scans de partidas futuras (minutos)
-  scan_interval: 60
+  scan_interval: 15
   # Hora do scrape diario de stats (formato 24h)
   daily_update_hour: 6
   daily_top5_audit_enabled: true

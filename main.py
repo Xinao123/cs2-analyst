@@ -344,6 +344,15 @@ async def analyze_upcoming(
             with_odds_analyzed,
         )
         if with_odds_before_filters > 0 and with_odds_approved == 0:
+            dominant_reason, dominant_count = _dominant_odds_bottleneck(
+                {
+                    "started": odds_filtered_started,
+                    "low_data": odds_filtered_low_data,
+                    "low_conf": odds_filtered_low_confidence,
+                    "low_value": odds_filtered_low_value,
+                    "stale": odds_filtered_stale,
+                }
+            )
             logger.warning(
                 "[ANALYSIS] Odds existem no banco (%s), mas 0 picks com odds foram aprovadas "
                 "(analisadas_com_odds=%s | started=%s low_data=%s low_conf=%s low_value=%s stale=%s).",
@@ -354,6 +363,11 @@ async def analyze_upcoming(
                 odds_filtered_low_confidence,
                 odds_filtered_low_value,
                 odds_filtered_stale,
+            )
+            logger.info(
+                "[ANALYSIS][ODDS] gargalo_dominante=%s (%s)",
+                dominant_reason,
+                dominant_count,
             )
 
     logger.info(
@@ -423,16 +437,15 @@ def _resolve_live_thresholds(model_cfg: dict, predictor: Predictor | None = None
     Resolve thresholds efetivos de confianca/value para inferencia ao vivo.
 
     Regras:
-    - Usa valores explicitos do config quando presentes.
-    - Auto-tune entra apenas quando `min_confidence` nao foi definido explicitamente.
+    - Usa valores do config como base.
+    - Com `confidence_auto_tune=true`, aplica `max(min_confidence_config, min_confidence_tunado)`.
     - Partidas com time sintetico usam piso mais rigoroso.
     """
-    min_conf_cfg_explicit = "min_confidence" in model_cfg
     base_conf = max(0.0, float(model_cfg.get("min_confidence", 62.0)))
-    if bool(model_cfg.get("confidence_auto_tune", True)) and not min_conf_cfg_explicit and predictor is not None:
+    if bool(model_cfg.get("confidence_auto_tune", True)) and predictor is not None:
         tuned_conf = float(getattr(predictor, "min_confidence", 0.0))
         if tuned_conf > 0:
-            base_conf = tuned_conf
+            base_conf = max(base_conf, tuned_conf)
 
     base_value = max(0.0, float(model_cfg.get("min_value_pct", 6.0)))
     synthetic_conf = max(
@@ -449,6 +462,25 @@ def _resolve_live_thresholds(model_cfg: dict, predictor: Predictor | None = None
         "synthetic_min_confidence": synthetic_conf,
         "synthetic_min_value": synthetic_value,
     }
+
+
+def _should_sync_odds(now_ts: float, last_sync_at: float | None, refresh_seconds: int) -> bool:
+    """Throttle simples para sync de odds baseado em tempo real."""
+    if refresh_seconds <= 0:
+        return True
+    if last_sync_at is None:
+        return True
+    return now_ts >= (last_sync_at + refresh_seconds)
+
+
+def _dominant_odds_bottleneck(counts: dict[str, int]) -> tuple[str, int]:
+    """Retorna o principal motivo de descarte para partidas com odds."""
+    if not counts:
+        return "none", 0
+    reason, count = max(counts.items(), key=lambda item: int(item[1]))
+    if int(count) <= 0:
+        return "none", 0
+    return str(reason), int(count)
 
 
 def _safe_float(value) -> float:
@@ -705,11 +737,7 @@ async def run(config: dict, once: bool = False):
     odds_cfg = config.get("odds", {})
     scraper_cfg = config.get("scraper", {})
     odds_sync_during_wait = bool(odds_cfg.get("sync_during_wait", False))
-    next_odds_sync_at = (
-        time.time() + odds_sync.refresh_seconds
-        if odds_sync.enabled and odds_sync_during_wait
-        else float("inf")
-    )
+    last_odds_sync_at: float | None = None
     history_sync_enabled = bool(scraper_cfg.get("pandascore_history_enabled", True))
     history_sync_seconds = max(
         300,
@@ -788,11 +816,18 @@ async def run(config: dict, once: bool = False):
                 await asyncio.to_thread(daily_auditor.run_if_due)
                 next_audit_probe_at = time.time() + 30
 
-            # Atualiza odds reais antes da analise (uma vez no --once e a cada ciclo normal)
+            # Atualiza odds reais antes da analise (respeita throttle por refresh_minutes)
             if odds_sync.enabled:
-                if odds_sync_during_wait:
-                    next_odds_sync_at = time.time() + odds_sync.refresh_seconds
-                await asyncio.to_thread(odds_sync.sync_upcoming_odds)
+                now_ts = time.time()
+                if _should_sync_odds(now_ts, last_odds_sync_at, odds_sync.refresh_seconds):
+                    await asyncio.to_thread(odds_sync.sync_upcoming_odds)
+                    last_odds_sync_at = now_ts
+                else:
+                    wait_sec = int(max(0, (last_odds_sync_at + odds_sync.refresh_seconds) - now_ts))
+                    logger.info(
+                        "[ODDS] Throttle ativo, proximo sync em ~%ss",
+                        wait_sec,
+                    )
 
             # Analisa partidas futuras
             await analyze_upcoming(
@@ -818,9 +853,11 @@ async def run(config: dict, once: bool = False):
         for _ in range(interval):
             if not _running:
                 break
-            if odds_sync.enabled and odds_sync_during_wait and time.time() >= next_odds_sync_at:
-                next_odds_sync_at = time.time() + odds_sync.refresh_seconds
-                await asyncio.to_thread(odds_sync.sync_upcoming_odds)
+            if odds_sync.enabled and odds_sync_during_wait:
+                now_ts = time.time()
+                if _should_sync_odds(now_ts, last_odds_sync_at, odds_sync.refresh_seconds):
+                    await asyncio.to_thread(odds_sync.sync_upcoming_odds)
+                    last_odds_sync_at = now_ts
             if history_sync_enabled and time.time() >= next_history_sync_at:
                 next_history_sync_at = time.time() + history_sync_seconds
                 await asyncio.to_thread(history_scraper.sync_pandascore_history, False, False)
