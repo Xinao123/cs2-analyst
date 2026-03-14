@@ -155,6 +155,19 @@ CREATE TABLE IF NOT EXISTS odds_snapshots (
     FOREIGN KEY (match_id) REFERENCES matches(id)
 );
 
+CREATE TABLE IF NOT EXISTS clv_tracking (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    prediction_id INTEGER,
+    match_id INTEGER NOT NULL,
+    side TEXT NOT NULL,
+    open_odds REAL NOT NULL,
+    close_odds REAL NOT NULL,
+    clv_pct REAL NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (prediction_id) REFERENCES predictions(id),
+    FOREIGN KEY (match_id) REFERENCES matches(id)
+);
+
 CREATE TABLE IF NOT EXISTS daily_top5_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_date TEXT NOT NULL UNIQUE,
@@ -214,6 +227,7 @@ CREATE INDEX IF NOT EXISTS idx_players_team ON players(team_id);
 CREATE INDEX IF NOT EXISTS idx_match_maps_match ON match_maps(match_id);
 CREATE INDEX IF NOT EXISTS idx_odds_latest_updated ON match_odds_latest(updated_at);
 CREATE INDEX IF NOT EXISTS idx_odds_snapshots_match ON odds_snapshots(match_id, collected_at);
+CREATE INDEX IF NOT EXISTS idx_clv_tracking_match_created ON clv_tracking(match_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_daily_top5_runs_date ON daily_top5_runs(run_date);
 CREATE INDEX IF NOT EXISTS idx_daily_top5_items_run ON daily_top5_items(run_id, rank);
 CREATE INDEX IF NOT EXISTS idx_daily_top5_items_outcome ON daily_top5_items(outcome_status, run_id);
@@ -479,6 +493,88 @@ class Database:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_team_side_stats(
+        self,
+        team_id: int,
+        days: int = 180,
+        as_of_date=None,
+        max_rows: int = 800,
+    ) -> dict:
+        """
+        Agrega forca em lados CT/T usando rounds de mapas historicos.
+
+        Retorna taxas em [0, 1] com fallback neutro (0.5) quando nao houver base.
+        """
+        before_dt = _parse_dt(as_of_date) if as_of_date is not None else datetime.now().astimezone()
+        if before_dt is None:
+            before_dt = datetime.now().astimezone()
+
+        before_iso = before_dt.isoformat(timespec="seconds")
+        window_start = (before_dt - timedelta(days=max(1, int(days)))).isoformat(timespec="seconds")
+
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT m.team1_id, m.team2_id,
+                          mm.team1_ct_rounds, mm.team1_t_rounds,
+                          mm.team2_ct_rounds, mm.team2_t_rounds
+                   FROM match_maps mm
+                   JOIN matches m ON m.id = mm.match_id
+                   WHERE m.status='completed'
+                     AND datetime(m.date) < datetime(?)
+                     AND datetime(m.date) >= datetime(?)
+                     AND (m.team1_id=? OR m.team2_id=?)
+                   ORDER BY m.date DESC
+                   LIMIT ?""",
+                (
+                    before_iso,
+                    window_start,
+                    team_id,
+                    team_id,
+                    max(1, int(max_rows)),
+                ),
+            ).fetchall()
+
+        ct_won = 0
+        ct_total = 0
+        t_won = 0
+        t_total = 0
+        maps_count = 0
+
+        for row in rows:
+            rec = dict(row)
+            is_team1 = int(rec.get("team1_id", 0) or 0) == int(team_id)
+
+            t1_ct = _safe_int(rec.get("team1_ct_rounds"))
+            t1_t = _safe_int(rec.get("team1_t_rounds"))
+            t2_ct = _safe_int(rec.get("team2_ct_rounds"))
+            t2_t = _safe_int(rec.get("team2_t_rounds"))
+
+            if is_team1:
+                ct_won += t1_ct
+                ct_total += (t1_ct + t2_t)
+                t_won += t1_t
+                t_total += (t1_t + t2_ct)
+            else:
+                ct_won += t2_ct
+                ct_total += (t2_ct + t1_t)
+                t_won += t2_t
+                t_total += (t2_t + t1_ct)
+
+            maps_count += 1
+
+        ct_rate = (ct_won / ct_total) if ct_total > 0 else 0.5
+        t_rate = (t_won / t_total) if t_total > 0 else 0.5
+        return {
+            "team_id": int(team_id),
+            "maps_count": int(maps_count),
+            "ct_rounds_won": int(ct_won),
+            "ct_rounds_total": int(ct_total),
+            "ct_win_rate": float(ct_rate),
+            "t_rounds_won": int(t_won),
+            "t_rounds_total": int(t_total),
+            "t_win_rate": float(t_rate),
+        }
+
     def get_h2h(self, team1_id: int, team2_id: int) -> list[dict]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -679,6 +775,14 @@ class Database:
                 ),
             )
 
+    def get_match_odds_latest(self, match_id: int) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM match_odds_latest WHERE match_id=? LIMIT 1",
+                (match_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     # ============================================================
     # Predictions
     # ============================================================
@@ -720,6 +824,110 @@ class Database:
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_recent_resolved_predictions(self, days: int = 30) -> list[dict]:
+        """
+        Retorna predições recentes com desfecho conhecido para ajuste de risco.
+
+        Prioridade:
+        1) tabela predictions com actual_winner_id preenchido
+        2) fallback em daily_top5_items auditadas (win/loss)
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT p.id AS prediction_id,
+                          p.match_id,
+                          p.predicted_winner_id,
+                          p.model_winner_id,
+                          p.official_pick_winner_id,
+                          p.value_pct,
+                          p.suggested_stake,
+                          p.actual_winner_id,
+                          p.created_at
+                   FROM predictions p
+                   WHERE p.actual_winner_id IS NOT NULL
+                     AND datetime(p.created_at) >= datetime('now', ?)
+                   ORDER BY p.created_at DESC""",
+                (f"-{max(1, int(days))} days",),
+            ).fetchall()
+            out = [dict(r) for r in rows]
+            if out:
+                return out
+
+            rows = conn.execute(
+                """SELECT NULL AS prediction_id,
+                          i.match_id,
+                          i.predicted_winner_id,
+                          i.model_winner_id,
+                          i.official_pick_winner_id,
+                          i.value_pct,
+                          NULL AS suggested_stake,
+                          i.actual_winner_id,
+                          COALESCE(i.resolved_at, r.created_at) AS created_at
+                   FROM daily_top5_items i
+                   JOIN daily_top5_runs r ON r.id=i.run_id
+                   WHERE i.outcome_status IN ('win', 'loss')
+                     AND i.actual_winner_id IS NOT NULL
+                     AND datetime(COALESCE(i.resolved_at, r.created_at)) >= datetime('now', ?)
+                   ORDER BY COALESCE(i.resolved_at, r.created_at) DESC""",
+                (f"-{max(1, int(days))} days",),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # ============================================================
+    # CLV Tracking
+    # ============================================================
+
+    def save_clv(
+        self,
+        match_id: int,
+        side: str,
+        open_odds: float,
+        close_odds: float,
+        prediction_id: int | None = None,
+        created_at: str | None = None,
+    ) -> float:
+        """
+        Persiste CLV da aposta.
+
+        Convencao:
+        - CLV positivo quando a odd de entrada e melhor que a odd de fechamento.
+        """
+        open_odds_f = _safe_float(open_odds)
+        close_odds_f = _safe_float(close_odds)
+        if open_odds_f <= 1.0 or close_odds_f <= 1.0:
+            return 0.0
+
+        clv_pct = ((open_odds_f / close_odds_f) - 1.0) * 100.0
+        stamp = created_at or datetime.now().isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO clv_tracking
+                    (prediction_id, match_id, side, open_odds, close_odds, clv_pct, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    prediction_id,
+                    int(match_id),
+                    str(side or ""),
+                    float(open_odds_f),
+                    float(close_odds_f),
+                    float(clv_pct),
+                    stamp,
+                ),
+            )
+        return float(clv_pct)
+
+    def get_avg_clv(self, days: int = 30) -> float:
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT AVG(clv_pct) AS avg_clv
+                   FROM clv_tracking
+                   WHERE datetime(created_at) >= datetime('now', ?)""",
+                (f"-{max(1, int(days))} days",),
+            ).fetchone()
+            if not row:
+                return 0.0
+            return _safe_float(row["avg_clv"])
 
     # ============================================================
     # Daily Top 5
@@ -957,3 +1165,10 @@ def _safe_int(value) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _safe_float(value) -> float:
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return 0.0

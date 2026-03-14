@@ -19,8 +19,10 @@ except ImportError:  # pragma: no cover - handled gracefully at runtime
 
 from ai.prompts import (
     SYSTEM_AUDIT,
+    SYSTEM_ANOMALY_CHECK,
     SYSTEM_MATCH_ANALYSIS,
     SYSTEM_TOP_PICKS,
+    build_anomaly_prompt,
     build_audit_prompt,
     build_match_analysis_prompt,
     build_top_picks_prompt,
@@ -48,10 +50,13 @@ class DeepSeekClient:
         self.max_calls = max(1, int(llm_cfg.get("max_calls_per_cycle", 5)))
         self.monthly_budget = max(0.0, float(llm_cfg.get("monthly_budget_usd", 2.0)))
         self.skip_unchanged = bool(llm_cfg.get("skip_unchanged_picks", True))
+        self.anomaly_check_enabled = bool(llm_cfg.get("llm_anomaly_check_enabled", False))
+        self.anomaly_max_checks = max(0, int(llm_cfg.get("llm_anomaly_max_checks_per_cycle", 2)))
 
         self._client: Optional[OpenAI] = None
         self._cache: dict[str, tuple[str, float]] = {}
         self._calls_this_cycle = 0
+        self._anomaly_checks_this_cycle = 0
         self._month_cost_usd = 0.0
         self._current_month = datetime.now().month
         self._last_picks_hash = ""
@@ -92,6 +97,7 @@ class DeepSeekClient:
     def reset_cycle_counter(self):
         """Reset call budget at the beginning of each bot cycle."""
         self._calls_this_cycle = 0
+        self._anomaly_checks_this_cycle = 0
 
     def generate(self, system_prompt: str, user_prompt: str, model: str | None = None) -> str | None:
         """Generate text response with retries, cache, and budget limits."""
@@ -216,6 +222,31 @@ class DeepSeekClient:
         """Generate natural-language daily audit commentary."""
         prompt = build_audit_prompt(summary)
         return self.generate(SYSTEM_AUDIT, prompt)
+
+    def generate_anomaly_flag(self, match: dict, prediction: dict, analysis: dict) -> str | None:
+        """
+        D3: anomaly flagging curto (OK|FLAG), com cap proprio por ciclo.
+        """
+        if not self.anomaly_check_enabled:
+            return None
+        if self.anomaly_max_checks <= 0:
+            return None
+        if self._anomaly_checks_this_cycle >= self.anomaly_max_checks:
+            return None
+
+        self._anomaly_checks_this_cycle += 1
+        prompt = build_anomaly_prompt(match=match, prediction=prediction, analysis=analysis)
+        out = self.generate(SYSTEM_ANOMALY_CHECK, prompt)
+        if not out:
+            return None
+
+        text = out.strip()
+        upper = text.upper()
+        if upper.startswith("FLAG"):
+            return f"FLAG {text[4:].strip()}".strip()
+        if upper.startswith("OK"):
+            return f"OK {text[2:].strip()}".strip()
+        return text
 
     def _estimate_cost(self, input_tokens: int, output_tokens: int) -> float:
         input_rate = 0.27 / 1_000_000

@@ -2,9 +2,9 @@
 
 SYSTEM_MATCH_ANALYSIS = (
     "Voce e um analista senior de CS2 focado em value betting. "
-    "TAREFA: analise a partida usando apenas dados fornecidos. "
+    "TAREFA: analise a partida usando apenas dados fornecidos e explique o racional do modelo. "
     "FORMATO: texto corrido em portugues BR, 120-180 palavras, sem markdown. "
-    "REGRAS: mencione forma, ranking, H2H, map pool e contexto do evento; "
+    "REGRAS: mencione forma, ranking, H2H, map pool, contexto do evento e drivers de decisao; "
     "se houver value, explique desalinhamento da odd; nao invente dados."
 )
 
@@ -24,6 +24,12 @@ SYSTEM_EXPLAINABILITY = (
     "Voce traduz feature importance de ML para linguagem clara. "
     "FORMATO: texto corrido em portugues BR, 60-80 palavras, sem markdown. "
     "REGRAS: explique apenas com base nas features fornecidas."
+)
+
+SYSTEM_ANOMALY_CHECK = (
+    "Voce e um verificador de anomalias para picks de CS2. "
+    "Retorne apenas: OK ou FLAG, seguido de no maximo 12 palavras de motivo. "
+    "Flag somente para incoerencia evidente entre probabilidade, odd e contexto."
 )
 
 
@@ -51,8 +57,17 @@ def build_match_analysis_prompt(
         f"form_diff:{_safe_num(features.get('form_diff')):+.3f} "
         f"h2h_wr:{_safe_num(features.get('h2h_winrate_t1'), 0.5):.2f}({int(_safe_num(features.get('h2h_matches')))}g) "
         f"streak:{int(_safe_num(features.get('team1_streak'))):+d}/{int(_safe_num(features.get('team2_streak'))):+d} "
-        f"rating_diff:{_safe_num(features.get('avg_rating_diff')):+.3f} "
-        f"maps_diff:{_safe_num(features.get('strong_maps_diff')):+.0f}"
+        f"maps_diff:{_safe_num(features.get('strong_maps_diff')):+.0f} "
+        f"rust:{_safe_num(features.get('team1_rust_days')):.1f}/{_safe_num(features.get('team2_rust_days')):.1f}d "
+        f"vol:{_safe_num(features.get('team1_volatility')):.3f}/{_safe_num(features.get('team2_volatility')):.3f}"
+    )
+
+    driver_line = (
+        f"Drivers: wr7d_diff={_safe_num(features.get('wr_diff_7d')):+.3f} "
+        f"bo_wr_diff={_safe_num(features.get('bo_wr_diff')):+.3f} "
+        f"venue_wr_diff={_safe_num(features.get('venue_wr_diff')):+.3f} "
+        f"side_diff={_safe_num(features.get('side_strength_diff')):+.3f} "
+        f"map_adv_diff={_safe_num(features.get('map_advantage_diff')):+.3f}"
     )
 
     value_str = "Sem value detectado"
@@ -82,7 +97,8 @@ def build_match_analysis_prompt(
         f"Modelo: {team1} {p1:.1f}% x {p2:.1f}% {team2} | Conf:{conf:.1f}% | Fav:{model_winner}\n"
         f"{odds_str}\n"
         f"{value_str}\n"
-        f"Features: {f_line}\n\n"
+        f"Features: {f_line}\n"
+        f"{driver_line}\n\n"
         f"{context_text}\n\n"
         "Gere a analise."
     )
@@ -122,7 +138,13 @@ def build_audit_prompt(summary: dict) -> str:
     accuracy = float(summary.get("accuracy", 0.0))
     run_date = str(summary.get("run_date", "?"))
 
-    lines = [f"Auditoria {run_date}: {wins}W {losses}L {pending}P | Acc:{accuracy:.1f}%"]
+    trend_7d = _safe_num(summary.get("trend_7d", 0.0))
+    clv_30d = _safe_num(summary.get("avg_clv_30d", 0.0))
+
+    lines = [
+        f"Auditoria {run_date}: {wins}W {losses}L {pending}P | Acc:{accuracy:.1f}% | "
+        f"Trend7d:{trend_7d:.1f}% | CLV30d:{clv_30d:+.2f}%"
+    ]
     for item in summary.get("items", []) or []:
         status = str(item.get("outcome_status", "?"))
         team1 = str(item.get("team1_name", "?"))
@@ -148,6 +170,42 @@ def build_explainability_prompt(
         f"{team1} vs {team2} | Fav:{winner} ({p1:.1f}%x{p2:.1f}%)\n"
         f"Top features: {feats}\n"
         "Explique a predicao."
+    )
+
+
+def build_anomaly_prompt(
+    match: dict,
+    prediction: dict,
+    analysis: dict,
+) -> str:
+    t1 = str(match.get("team1_name", "Team1"))
+    t2 = str(match.get("team2_name", "Team2"))
+    event = str(match.get("event_name", "?"))
+    p1 = _safe_num(prediction.get("team1_win_prob"), 50.0)
+    p2 = _safe_num(prediction.get("team2_win_prob"), 50.0)
+    conf = _safe_num(prediction.get("confidence"), 50.0)
+    o1 = _safe_num(analysis.get("odds_team1"), 0.0)
+    o2 = _safe_num(analysis.get("odds_team2"), 0.0)
+
+    best = None
+    for vb in analysis.get("value_bets", []) if isinstance(analysis, dict) else []:
+        if best is None or _safe_num(vb.get("value_pct")) > _safe_num(best.get("value_pct")):
+            best = vb
+
+    if best:
+        vb_line = (
+            f"best_value={best.get('side')} odd={_safe_num(best.get('odds')):.2f} "
+            f"value={_safe_num(best.get('value_pct')):+.1f}% ev={_safe_num(best.get('expected_value')):+.2f}"
+        )
+    else:
+        vb_line = "best_value=none"
+
+    return (
+        f"{t1} vs {t2} | {event}\n"
+        f"probs={p1:.1f}/{p2:.1f} conf={conf:.1f}\n"
+        f"odds={o1:.2f}/{o2:.2f}\n"
+        f"{vb_line}\n"
+        "Classifique anomalia em uma linha."
     )
 
 

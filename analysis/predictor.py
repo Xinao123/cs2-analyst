@@ -5,6 +5,9 @@ Usa XGBoost (ou fallback LogisticRegression) para classificacao binaria.
 Output: probabilidade de team1 vencer.
 """
 
+from __future__ import annotations
+
+import itertools
 import logging
 import math
 from datetime import datetime, timedelta
@@ -12,6 +15,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+from sklearn.base import clone
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
@@ -39,6 +43,8 @@ class Predictor:
         self.prediction_temperature = _clamp_float(model_cfg.get("prediction_temperature", 0.9), 0.5, 1.5)
         self.low_data_rank_blend = _clamp_float(model_cfg.get("low_data_rank_blend", 0.35), 0.0, 0.9)
         self.rank_prior_scale = max(1.0, float(model_cfg.get("rank_prior_scale", 12.0)))
+
+        # Robustez temporal
         self.holdout_days = max(3, int(model_cfg.get("holdout_days", 14)))
         self.recency_half_life_days = max(7.0, float(model_cfg.get("recency_half_life_days", 120)))
         self.min_train_samples = max(20, int(model_cfg.get("min_train_samples", 120)))
@@ -47,8 +53,16 @@ class Predictor:
         self.confidence_grid = _parse_confidence_grid(model_cfg.get("confidence_grid", [60, 65, 70, 75, 80]))
         self.coverage_min_holdout = _clamp_float(model_cfg.get("coverage_min_holdout", 0.15), 0.01, 1.0)
 
+        # ML improvements v2
+        self.enable_hyperparam_tuning = bool(model_cfg.get("enable_hyperparam_tuning", False))
+        self.tuning_max_combinations = max(1, int(model_cfg.get("tuning_max_combinations", 50)))
+        self.enable_ensemble = bool(model_cfg.get("enable_ensemble", False))
+
         self.pipeline = None
         self.proba_model = None
+        self.ensemble_models: list[tuple[str, object]] = []
+        self.primary_model_name = ""
+        self.tuning_summary: dict = {}
         self._feature_names: list[str] = []
         self._is_trained = False
         self._is_calibrated = False
@@ -63,16 +77,6 @@ class Predictor:
         match_dates: list[str] | None = None,
         sample_weights: list[float] | np.ndarray | None = None,
     ) -> dict:
-        """
-        Treina o modelo com dados historicos.
-
-        Args:
-            features_list: lista de dicts de features
-            labels: lista de 0/1 (team2/team1 venceu)
-
-        Returns:
-            dict com metricas de treinamento
-        """
         if len(features_list) < self.min_train_samples:
             logger.warning(
                 "[MODEL] Poucas amostras (%s), minimo recomendado: %s",
@@ -95,6 +99,7 @@ class Predictor:
         unique_classes = np.unique(y)
         if len(unique_classes) < 2:
             return {"error": "Labels com apenas uma classe; treino cancelado"}
+
         class_1 = int(np.sum(y == 1))
         class_0 = int(np.sum(y == 0))
         if class_1 < self.min_class_samples or class_0 < self.min_class_samples:
@@ -105,14 +110,7 @@ class Predictor:
                 )
             }
 
-        logger.info(f"[MODEL] Treinando com {len(X)} amostras, {len(self._feature_names)} features")
-
-        # Tenta XGBoost, fallback pra LogisticRegression
-        model, model_name = self._build_model(y)
-
-        self.pipeline = self._build_pipeline(model)
-        self.proba_model = self.pipeline
-        self._is_calibrated = False
+        logger.info("[MODEL] Treinando com %s amostras, %s features", len(X), len(self._feature_names))
 
         recency_weights = _build_recency_weights(
             match_dates=match_dates,
@@ -133,10 +131,19 @@ class Predictor:
         if len(train_idx) < max(20, self.min_train_samples // 2):
             return {"error": "Conjunto de treino insuficiente apos holdout temporal"}
 
-        # Cross-validation temporal (nao embaralha - respeita cronologia)
         X_train = X[train_idx]
         y_train = y[train_idx]
         w_train = sample_weight[train_idx]
+
+        model, model_name, tuning_meta = self._select_primary_model(X_train, y_train, y)
+        self.primary_model_name = model_name
+        self.tuning_summary = tuning_meta
+
+        self.pipeline = self._build_pipeline(model)
+        self.proba_model = self.pipeline
+        self._is_calibrated = False
+        self.ensemble_models = []
+
         n_splits = min(5, len(X_train) // 20)
         if n_splits >= 2:
             tscv = TimeSeriesSplit(n_splits=n_splits)
@@ -152,12 +159,14 @@ class Predictor:
             cv_accuracy = 0.0
             cv_std = 0.0
 
-        # Treina no conjunto train (expanding + holdout temporal no fim)
-        self._fit_pipeline(X_train, y_train, w_train)
+        self._fit_pipeline(self.pipeline, X_train, y_train, w_train)
         self._fit_calibrator(X_train, y_train, n_splits)
+
+        if self.enable_ensemble:
+            self._fit_ensemble_members(X_train, y_train, w_train, y)
+
         self._is_trained = True
 
-        # Metricas no training set (referencia)
         y_train_proba = self._predict_proba_vector(X_train)
         y_train_pred = (y_train_proba >= 0.5).astype(int)
         train_acc = accuracy_score(y_train, y_train_pred)
@@ -180,6 +189,7 @@ class Predictor:
             holdout_logloss = _safe_logloss(y_holdout, holdout_proba)
             holdout_brier = brier_score_loss(y_holdout, holdout_proba)
             holdout_size = len(y_holdout)
+
             if self.confidence_auto_tune:
                 tuned_confidence, tuned_precision, tuned_coverage = self._tune_confidence_threshold(
                     y_true=y_holdout,
@@ -212,12 +222,19 @@ class Predictor:
             "sample_weight_min": round(float(np.min(sample_weight)), 3) if len(sample_weight) else 0.0,
             "sample_weight_max": round(float(np.max(sample_weight)), 3) if len(sample_weight) else 0.0,
             "top_features": importances[:10],
+            "hyperparam_tuning": bool(self.enable_hyperparam_tuning),
+            "tuning_evaluated": int(self.tuning_summary.get("evaluated", 0)),
+            "tuning_best_brier": round(float(self.tuning_summary.get("best_brier", 0.0)), 4),
+            "ensemble_enabled": bool(self.enable_ensemble),
+            "ensemble_members": len(self.ensemble_models),
         }
 
         logger.info(
-            f"[MODEL] {model_name} treinado: "
-            f"CV accuracy={metrics['cv_accuracy']:.1f}% (+/-{metrics['cv_std']:.1f}%), "
-            f"train accuracy={metrics['train_accuracy']:.1f}%"
+            "[MODEL] %s treinado: CV accuracy=%s%% (+/-%s%%), train accuracy=%s%%",
+            model_name,
+            metrics["cv_accuracy"],
+            metrics["cv_std"],
+            metrics["train_accuracy"],
         )
         if holdout_size > 0:
             logger.info(
@@ -227,6 +244,14 @@ class Predictor:
                 metrics["holdout_brier"],
                 holdout_size,
             )
+        if self.enable_hyperparam_tuning:
+            logger.info(
+                "[MODEL] Tuning temporal (brier): avaliadas=%s melhor=%s",
+                metrics["tuning_evaluated"],
+                metrics["tuning_best_brier"],
+            )
+        if self.enable_ensemble:
+            logger.info("[MODEL] Ensemble ativo com %s membro(s)", len(self.ensemble_models))
         if self.confidence_auto_tune:
             logger.info(
                 "[MODEL] Threshold recomendado de confianca: %.1f%% (precision=%s%% coverage=%s%%)",
@@ -238,15 +263,6 @@ class Predictor:
         return metrics
 
     def predict(self, features: dict) -> dict | None:
-        """
-        Preve resultado de uma partida.
-
-        Args:
-            features: dict de features da partida
-
-        Returns:
-            dict com probabilidades ou None se modelo nao treinado
-        """
         if not self._is_trained or self.pipeline is None:
             logger.warning("[MODEL] Modelo nao treinado")
             return None
@@ -269,7 +285,137 @@ class Predictor:
             "predicted_winner": 1 if team1_prob > team2_prob else 2,
         }
 
-    def _build_model(self, y: np.ndarray):
+    def _select_primary_model(self, X_train: np.ndarray, y_train: np.ndarray, y_full: np.ndarray):
+        if not self.enable_hyperparam_tuning:
+            model, name = self._build_default_model(y_full)
+            return model, name, {"evaluated": 0, "best_brier": 0.0}
+
+        tune_X = X_train[-6000:] if len(X_train) > 6000 else X_train
+        tune_y = y_train[-6000:] if len(y_train) > 6000 else y_train
+        n_splits = min(4, len(tune_X) // 50)
+        if n_splits < 2:
+            model, name = self._build_default_model(y_full)
+            return model, name, {"evaluated": 0, "best_brier": 0.0}
+
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        best_model = None
+        best_name = ""
+        best_brier = float("inf")
+        evaluated = 0
+
+        candidates = self._build_tuning_candidates(y_full)
+        for cand in candidates:
+            if evaluated >= self.tuning_max_combinations:
+                break
+            model = cand["model"]
+            name = cand["name"]
+            pipeline = self._build_pipeline(model)
+            try:
+                scores = cross_val_score(
+                    pipeline,
+                    tune_X,
+                    tune_y,
+                    cv=tscv,
+                    scoring="neg_brier_score",
+                )
+                brier = float(-np.mean(scores))
+            except Exception as exc:
+                logger.debug("[MODEL] Tuning skip %s (%s)", name, exc)
+                continue
+
+            evaluated += 1
+            if brier < best_brier:
+                best_brier = brier
+                best_model = model
+                best_name = name
+
+        if best_model is None:
+            model, name = self._build_default_model(y_full)
+            return model, name, {"evaluated": evaluated, "best_brier": 0.0}
+
+        return best_model, best_name, {"evaluated": evaluated, "best_brier": best_brier}
+    def _build_tuning_candidates(self, y: np.ndarray) -> list[dict]:
+        candidates: list[dict] = []
+
+        # XGBoost templates
+        try:
+            from xgboost import XGBClassifier
+
+            pos = max(1, int(np.sum(y == 1)))
+            neg = max(1, int(np.sum(y == 0)))
+            scale_pos = float(neg / pos)
+            xgb_grid = {
+                "n_estimators": [160, 220],
+                "max_depth": [4, 6],
+                "learning_rate": [0.03, 0.05],
+                "subsample": [0.85, 0.95],
+                "colsample_bytree": [0.85, 0.95],
+            }
+            for params in _expand_grid(xgb_grid):
+                candidates.append(
+                    {
+                        "name": "XGBoost",
+                        "model": XGBClassifier(
+                            eval_metric="logloss",
+                            random_state=42,
+                            scale_pos_weight=scale_pos,
+                            min_child_weight=2,
+                            reg_lambda=1.0,
+                            reg_alpha=0.05,
+                            n_jobs=1,
+                            verbosity=0,
+                            **params,
+                        ),
+                    }
+                )
+        except Exception:
+            pass
+
+        # LightGBM templates (opcional)
+        try:
+            from lightgbm import LGBMClassifier
+
+            lgbm_grid = {
+                "n_estimators": [200, 280],
+                "num_leaves": [31, 63],
+                "learning_rate": [0.03, 0.05],
+                "subsample": [0.85],
+                "colsample_bytree": [0.85, 0.95],
+            }
+            for params in _expand_grid(lgbm_grid):
+                candidates.append(
+                    {
+                        "name": "LightGBM",
+                        "model": LGBMClassifier(
+                            objective="binary",
+                            random_state=42,
+                            class_weight="balanced",
+                            **params,
+                        ),
+                    }
+                )
+        except Exception:
+            pass
+
+        # Logistic templates
+        from sklearn.linear_model import LogisticRegression
+
+        for c in [0.6, 1.0, 1.6]:
+            candidates.append(
+                {
+                    "name": "LogisticRegression",
+                    "model": LogisticRegression(
+                        max_iter=1200,
+                        random_state=42,
+                        C=float(c),
+                        class_weight="balanced",
+                    ),
+                }
+            )
+
+        return candidates
+
+    def _build_default_model(self, y: np.ndarray):
         try:
             from xgboost import XGBClassifier
 
@@ -303,21 +449,75 @@ class Predictor:
             logger.info("[MODEL] XGBoost nao disponivel, usando LogisticRegression")
             return model, "LogisticRegression"
 
-    def _build_pipeline(self, model):
-        return Pipeline([
-            ("scaler", StandardScaler()),
-            ("model", model),
-        ])
+    def _fit_ensemble_members(self, X_train: np.ndarray, y_train: np.ndarray, w_train: np.ndarray, y_full: np.ndarray):
+        members: list[tuple[str, object]] = []
+        primary = self.proba_model if self.proba_model is not None else self.pipeline
+        if primary is not None:
+            members.append(("primary", primary))
 
-    def _fit_pipeline(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None):
+        # Logistic member
+        from sklearn.linear_model import LogisticRegression
+
+        lr_member = self._build_pipeline(
+            LogisticRegression(
+                max_iter=1200,
+                random_state=42,
+                C=1.0,
+                class_weight="balanced",
+            )
+        )
+        self._fit_pipeline(lr_member, X_train, y_train, w_train)
+        members.append(("logreg", lr_member))
+
+        # LightGBM member (se disponivel)
+        try:
+            from lightgbm import LGBMClassifier
+
+            lgbm_member = self._build_pipeline(
+                LGBMClassifier(
+                    objective="binary",
+                    random_state=42,
+                    n_estimators=240,
+                    num_leaves=31,
+                    learning_rate=0.05,
+                    class_weight="balanced",
+                    subsample=0.9,
+                    colsample_bytree=0.9,
+                )
+            )
+            self._fit_pipeline(lgbm_member, X_train, y_train, w_train)
+            members.append(("lgbm", lgbm_member))
+        except Exception:
+            pass
+
+        # XGBoost member adicional (se primario nao for XGB)
+        if self.primary_model_name != "XGBoost":
+            try:
+                xgb_member, _ = self._build_default_model(y_full)
+                xgb_pipeline = self._build_pipeline(xgb_member)
+                self._fit_pipeline(xgb_pipeline, X_train, y_train, w_train)
+                members.append(("xgb", xgb_pipeline))
+            except Exception:
+                pass
+
+        self.ensemble_models = members if len(members) > 1 else []
+
+    def _build_pipeline(self, model):
+        return Pipeline(
+            [
+                ("scaler", StandardScaler()),
+                ("model", model),
+            ]
+        )
+
+    def _fit_pipeline(self, pipeline_obj, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None):
         if sample_weight is None:
-            self.pipeline.fit(X, y)
+            pipeline_obj.fit(X, y)
             return
         try:
-            self.pipeline.fit(X, y, model__sample_weight=sample_weight)
+            pipeline_obj.fit(X, y, model__sample_weight=sample_weight)
         except TypeError:
-            self.pipeline.fit(X, y)
-
+            pipeline_obj.fit(X, y)
     def _tune_confidence_threshold(self, y_true: np.ndarray, y_proba: np.ndarray) -> tuple[float, float, float]:
         if len(y_true) == 0:
             return float(self.min_confidence), 0.0, 0.0
@@ -340,9 +540,7 @@ class Predictor:
                 continue
             precision = float(np.mean(y_pred[mask] == y_true[mask]))
 
-            if precision > best_precision or (
-                abs(precision - best_precision) < 1e-9 and coverage > best_coverage
-            ):
+            if precision > best_precision or (abs(precision - best_precision) < 1e-9 and coverage > best_coverage):
                 best_thr = float(thr)
                 best_precision = precision
                 best_coverage = coverage
@@ -354,6 +552,8 @@ class Predictor:
     def _fit_calibrator(self, X: np.ndarray, y: np.ndarray, n_splits: int):
         if not self.enable_calibration:
             return
+        if self.pipeline is None:
+            return
         if len(X) < self.calibration_min_samples:
             return
         if n_splits < 2:
@@ -364,8 +564,6 @@ class Predictor:
             return
 
         try:
-            from sklearn.base import clone
-
             base_estimator = clone(self.pipeline)
             calibrator = CalibratedClassifierCV(
                 estimator=base_estimator,
@@ -380,14 +578,23 @@ class Predictor:
             logger.warning("[MODEL] Calibracao indisponivel, mantendo probabilidade base: %s", exc)
 
     def _predict_proba_vector(self, X: np.ndarray) -> np.ndarray:
+        if self.enable_ensemble and self.ensemble_models:
+            probs = []
+            for _, model in self.ensemble_models:
+                p = _predict_proba_any(model, X)
+                if p is not None and len(p) == len(X):
+                    probs.append(np.clip(p, 1e-6, 1 - 1e-6))
+            if probs:
+                return np.clip(np.mean(np.vstack(probs), axis=0), 1e-6, 1 - 1e-6)
+
         model = self.proba_model or self.pipeline
         if model is None:
             return np.zeros(len(X))
 
-        proba = model.predict_proba(X)
-        if proba.ndim != 2 or proba.shape[1] < 2:
+        p = _predict_proba_any(model, X)
+        if p is None:
             return np.zeros(len(X))
-        return np.clip(proba[:, 1].astype(float), 1e-6, 1 - 1e-6)
+        return np.clip(p.astype(float), 1e-6, 1 - 1e-6)
 
     def _apply_low_data_rank_prior(self, team1_prob: float, features: dict) -> float:
         if self.low_data_rank_blend <= 0:
@@ -397,7 +604,6 @@ class Predictor:
         t2_games = max(0.0, float(features.get("team2_matches_played", 0)))
         h2h_games = max(0.0, float(features.get("h2h_matches", 0)))
 
-        # Menos jogos historicos => maior peso para prior de ranking.
         coverage = min(1.0, min(t1_games, t2_games) / 8.0)
         h2h_coverage = min(1.0, h2h_games / 5.0)
         info_score = max(coverage, h2h_coverage)
@@ -410,11 +616,12 @@ class Predictor:
         return ((1.0 - blend) * team1_prob) + (blend * rank_prior)
 
     def _get_feature_importance(self) -> list[tuple[str, float]]:
-        """Retorna features mais importantes."""
         if not self.pipeline:
             return []
 
-        model = self.pipeline.named_steps["model"]
+        model = self.pipeline.named_steps.get("model")
+        if model is None:
+            return []
 
         try:
             importances = model.feature_importances_
@@ -429,41 +636,73 @@ class Predictor:
         return [(name, round(float(imp), 4)) for name, imp in pairs]
 
     def _save(self):
-        """Salva modelo e metadata."""
         if not self.pipeline:
             return
+
         Path(self.model_path).parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(
             {
                 "pipeline": self.pipeline,
                 "proba_model": self.proba_model,
+                "ensemble_models": self.ensemble_models,
+                "enable_ensemble": self.enable_ensemble,
+                "primary_model_name": self.primary_model_name,
+                "tuning_summary": self.tuning_summary,
                 "feature_names": self._feature_names,
                 "is_calibrated": self._is_calibrated,
                 "recommended_min_confidence": float(self.min_confidence),
             },
             self.model_path,
         )
-        logger.info(f"[MODEL] Salvo em {self.model_path}")
+        logger.info("[MODEL] Salvo em %s", self.model_path)
 
     def _load(self):
-        """Carrega modelo salvo."""
         path = Path(self.model_path)
-        if path.exists():
-            try:
-                data = joblib.load(self.model_path)
-                self.pipeline = data["pipeline"]
-                self.proba_model = data.get("proba_model", self.pipeline)
-                self._feature_names = data["feature_names"]
-                self._is_calibrated = bool(data.get("is_calibrated", False))
-                self.min_confidence = float(data.get("recommended_min_confidence", self.min_confidence))
-                self._is_trained = True
-                logger.info(f"[MODEL] Carregado de {self.model_path}")
-            except Exception as e:
-                logger.warning(f"[MODEL] Erro ao carregar: {e}")
+        if not path.exists():
+            return
+
+        try:
+            data = joblib.load(self.model_path)
+            self.pipeline = data["pipeline"]
+            self.proba_model = data.get("proba_model", self.pipeline)
+            self.ensemble_models = data.get("ensemble_models", []) or []
+            self.enable_ensemble = bool(data.get("enable_ensemble", self.enable_ensemble))
+            self.primary_model_name = str(data.get("primary_model_name", ""))
+            self.tuning_summary = data.get("tuning_summary", {}) or {}
+            self._feature_names = data["feature_names"]
+            self._is_calibrated = bool(data.get("is_calibrated", False))
+            self.min_confidence = float(data.get("recommended_min_confidence", self.min_confidence))
+            self._is_trained = True
+            logger.info("[MODEL] Carregado de %s", self.model_path)
+        except Exception as e:
+            logger.warning("[MODEL] Erro ao carregar: %s", e)
 
     @property
     def is_trained(self) -> bool:
         return self._is_trained
+
+def _predict_proba_any(model, X: np.ndarray) -> np.ndarray | None:
+    try:
+        proba = model.predict_proba(X)
+        if proba.ndim == 2 and proba.shape[1] >= 2:
+            return np.asarray(proba[:, 1], dtype=float)
+    except Exception:
+        pass
+
+    try:
+        decision = np.asarray(model.decision_function(X), dtype=float)
+        return 1.0 / (1.0 + np.exp(-decision))
+    except Exception:
+        return None
+
+
+def _expand_grid(grid: dict[str, list]) -> list[dict]:
+    keys = list(grid.keys())
+    values = [grid[k] for k in keys]
+    out = []
+    for combo in itertools.product(*values):
+        out.append({k: v for k, v in zip(keys, combo)})
+    return out
 
 
 def _clamp_float(value, low: float, high: float) -> float:
@@ -565,7 +804,6 @@ def _temporal_split_indices(
             if len(holdout_idx) >= 10 and len(train_idx) >= 20:
                 return train_idx, holdout_idx
 
-    # Fallback temporal: ultimos ~15% como holdout
     holdout_size = max(10, int(total_samples * 0.15))
     holdout_size = min(holdout_size, max(1, total_samples // 3))
     cut = total_samples - holdout_size

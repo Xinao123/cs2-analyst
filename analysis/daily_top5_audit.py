@@ -162,6 +162,10 @@ class DailyTop5Auditor:
                     resolved_match_id=_safe_int(resolved.get("resolved_match_id")),
                     resolution_method=str(resolved.get("resolution_method", "")),
                 )
+                self._track_item_clv(
+                    item=item,
+                    resolved_match_id=_safe_int(resolved.get("resolved_match_id")),
+                )
 
         items = self.db.get_daily_top5_items(run_id)
         wins = sum(1 for i in items if str(i.get("outcome_status", "")) == "win")
@@ -177,6 +181,19 @@ class DailyTop5Auditor:
             and _safe_int(i.get("official_pick_winner_id")) > 0
             and _safe_int(i.get("model_winner_id")) != _safe_int(i.get("official_pick_winner_id"))
         )
+        recent_rows = self.db.get_recent_resolved_predictions(days=7)
+        recent_resolved = 0
+        recent_wins = 0
+        for row in recent_rows:
+            pred_id = _safe_int(row.get("official_pick_winner_id", row.get("predicted_winner_id")))
+            actual_id = _safe_int(row.get("actual_winner_id"))
+            if pred_id <= 0 or actual_id <= 0:
+                continue
+            recent_resolved += 1
+            if pred_id == actual_id:
+                recent_wins += 1
+        trend_7d = (recent_wins / recent_resolved * 100.0) if recent_resolved else 0.0
+        avg_clv_30d = float(self.db.get_avg_clv(days=30))
 
         status = "audited_empty"
         if total > 0:
@@ -195,6 +212,8 @@ class DailyTop5Auditor:
             "total": total,
             "accuracy": round(accuracy, 1),
             "model_vs_official_divergences": model_vs_official_divergences,
+            "trend_7d": round(trend_7d, 1),
+            "avg_clv_30d": round(avg_clv_30d, 2),
         }
         if send_notification:
             self.notifier.daily_top5_audit_report(summary)
@@ -331,6 +350,45 @@ class DailyTop5Auditor:
             "resolved_match_id": _safe_int(best.get("id")),
             "resolution_method": "teams_window",
         }
+
+    def _track_item_clv(self, item: dict, resolved_match_id: int):
+        open_odds = _safe_float(item.get("odds"))
+        if open_odds <= 1.0:
+            return
+
+        team1_id = _safe_int(item.get("team1_id"))
+        team2_id = _safe_int(item.get("team2_id"))
+        pick_id = _safe_int(item.get("official_pick_winner_id", item.get("predicted_winner_id")))
+        if pick_id <= 0:
+            return
+
+        if pick_id == team1_id:
+            side = "team1"
+        elif pick_id == team2_id:
+            side = "team2"
+        else:
+            return
+
+        target_match_id = resolved_match_id or _safe_int(item.get("match_id"))
+        if target_match_id <= 0:
+            return
+
+        latest = self.db.get_match_odds_latest(target_match_id)
+        if not latest:
+            return
+        close_odds = _safe_float(latest.get("odds_team1" if side == "team1" else "odds_team2"))
+        if close_odds <= 1.0:
+            return
+
+        try:
+            self.db.save_clv(
+                match_id=target_match_id,
+                side=side,
+                open_odds=open_odds,
+                close_odds=close_odds,
+            )
+        except Exception as exc:
+            logger.debug("[AUDIT] Falha ao salvar CLV item=%s: %s", item.get("id"), exc)
 
     def _is_due_time(self, now_local: datetime) -> bool:
         if now_local.hour > self.daily_audit_hour:

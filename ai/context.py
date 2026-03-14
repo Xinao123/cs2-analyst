@@ -1,8 +1,17 @@
 """Context collection for LLM prompts using local SQLite data."""
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime, timedelta, timezone
 
+from analysis.features import (
+    calc_format_win_rate,
+    calc_result_volatility,
+    calc_rust_days,
+    calc_venue_win_rate,
+    calc_window_win_rate,
+)
 from db.models import Database
 from utils.time_utils import parse_datetime_to_utc
 
@@ -34,12 +43,23 @@ class ContextCollector:
         if team1 and team2:
             sections.append(self._build_team_profiles(team1, team2))
 
-        recent_days = 90
-        team1_recent = self.db.get_team_recent_matches(team1_id, limit=self.recent_matches, days=recent_days)
-        team2_recent = self.db.get_team_recent_matches(team2_id, limit=self.recent_matches, days=recent_days)
+        recent_days = 180
+        team1_recent = self.db.get_team_recent_matches(team1_id, limit=max(self.recent_matches, 40), days=recent_days)
+        team2_recent = self.db.get_team_recent_matches(team2_id, limit=max(self.recent_matches, 40), days=recent_days)
         if team1_recent or team2_recent:
             sections.append(
                 self._build_recent_form(
+                    team1_name=team1_name,
+                    team1_id=team1_id,
+                    team1_recent=team1_recent,
+                    team2_name=team2_name,
+                    team2_id=team2_id,
+                    team2_recent=team2_recent,
+                )
+            )
+            sections.append(
+                self._build_advanced_metrics(
+                    match=match,
                     team1_name=team1_name,
                     team1_id=team1_id,
                     team1_recent=team1_recent,
@@ -101,12 +121,27 @@ class ContextCollector:
 
         start, end = self._audit_window(run_date)
         recent_completed = self.db.list_completed_matches_between(start, end)
+        recent_resolved = self.db.get_recent_resolved_predictions(days=7)
+        resolved_7d = 0
+        wins_7d = 0
+        for item in recent_resolved:
+            pred = int(item.get("official_pick_winner_id") or item.get("predicted_winner_id") or 0)
+            actual = int(item.get("actual_winner_id") or 0)
+            if pred <= 0 or actual <= 0:
+                continue
+            resolved_7d += 1
+            if pred == actual:
+                wins_7d += 1
+        trend_7d = (wins_7d / max(1, resolved_7d) * 100.0) if resolved_7d else 0.0
+        avg_clv_30d = float(self.db.get_avg_clv(days=30))
 
         return (
             "CONTEXTO AUDITORIA:\n"
             f"  Janela analisada: {start} -> {end}\n"
             f"  Resultado carteira: {wins}W/{losses}L/{pending}P (acc {accuracy:.1f}%)\n"
-            f"  Partidas completadas na janela: {len(recent_completed)}"
+            f"  Partidas completadas na janela: {len(recent_completed)}\n"
+            f"  Tendencia 7d (resolvidas): {trend_7d:.1f}% ({wins_7d}/{resolved_7d})\n"
+            f"  CLV medio 30d: {avg_clv_30d:+.2f}%"
         )
 
     def _build_team_profiles(self, team1: dict, team2: dict) -> str:
@@ -145,9 +180,59 @@ class ContextCollector:
             return f"  {name}: {wins}W-{losses}L -> {' | '.join(parts)}"
 
         return (
-            f"FORMA RECENTE (ultimos {self.recent_matches} jogos, 90 dias):\n"
+            f"FORMA RECENTE (ultimos {self.recent_matches} jogos):\n"
             f"{_format_matches(team1_name, team1_id, team1_recent)}\n"
             f"{_format_matches(team2_name, team2_id, team2_recent)}"
+        )
+
+    def _build_advanced_metrics(
+        self,
+        match: dict,
+        team1_name: str,
+        team1_id: int,
+        team1_recent: list[dict],
+        team2_name: str,
+        team2_id: int,
+        team2_recent: list[dict],
+    ) -> str:
+        ref_dt = parse_datetime_to_utc(match.get("date"), logger=logger, context="ctx.match_date")
+        if ref_dt is None:
+            ref_dt = datetime.now(timezone.utc)
+
+        best_of = int(match.get("best_of", 1) or 1)
+        is_lan = bool(match.get("is_lan", 0))
+
+        t1_rust = calc_rust_days(team1_recent, as_of_dt=ref_dt)
+        t2_rust = calc_rust_days(team2_recent, as_of_dt=ref_dt)
+
+        t1_wr_7 = calc_window_win_rate(team1_recent, team1_id, 7, as_of_dt=ref_dt)
+        t2_wr_7 = calc_window_win_rate(team2_recent, team2_id, 7, as_of_dt=ref_dt)
+        t1_wr_30 = calc_window_win_rate(team1_recent, team1_id, 30, as_of_dt=ref_dt)
+        t2_wr_30 = calc_window_win_rate(team2_recent, team2_id, 30, as_of_dt=ref_dt)
+
+        t1_bo = calc_format_win_rate(team1_recent, team1_id, best_of)
+        t2_bo = calc_format_win_rate(team2_recent, team2_id, best_of)
+        t1_venue = calc_venue_win_rate(team1_recent, team1_id, is_lan)
+        t2_venue = calc_venue_win_rate(team2_recent, team2_id, is_lan)
+
+        t1_vol = calc_result_volatility(team1_recent, team1_id)
+        t2_vol = calc_result_volatility(team2_recent, team2_id)
+
+        t1_side = self.db.get_team_side_stats(team1_id, days=180)
+        t2_side = self.db.get_team_side_stats(team2_id, days=180)
+        t1_ct = float(t1_side.get("ct_win_rate", 0.5))
+        t2_ct = float(t2_side.get("ct_win_rate", 0.5))
+        t1_t = float(t1_side.get("t_win_rate", 0.5))
+        t2_t = float(t2_side.get("t_win_rate", 0.5))
+
+        return (
+            "METRICAS AVANCADAS:\n"
+            f"  Rust(d): {team1_name}={t1_rust:.1f} | {team2_name}={t2_rust:.1f}\n"
+            f"  WR 7d/30d: {team1_name}={t1_wr_7:.2f}/{t1_wr_30:.2f} | {team2_name}={t2_wr_7:.2f}/{t2_wr_30:.2f}\n"
+            f"  WR BO{best_of}: {team1_name}={t1_bo:.2f} | {team2_name}={t2_bo:.2f}\n"
+            f"  WR {'LAN' if is_lan else 'Online'}: {team1_name}={t1_venue:.2f} | {team2_name}={t2_venue:.2f}\n"
+            f"  Volatilidade: {team1_name}={t1_vol:.3f} | {team2_name}={t2_vol:.3f}\n"
+            f"  Side CT/T: {team1_name}={t1_ct:.2f}/{t1_t:.2f} | {team2_name}={t2_ct:.2f}/{t2_t:.2f}"
         )
 
     def _build_h2h(self, team1_name: str, team2_name: str, h2h_matches: list[dict]) -> str:

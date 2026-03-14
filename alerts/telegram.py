@@ -158,6 +158,7 @@ class Notifier:
             ev = float(best_vb.get("expected_value", 0.0))
             bookmaker = _safe_text(best_vb.get("bookmaker", "N/D"))
             llm_pick = _safe_text(item.get("llm_analysis", ""))
+            llm_anomaly = _safe_text(item.get("llm_anomaly", ""))
             if llm_pick and len(llm_pick) > 320:
                 llm_pick = llm_pick[:317].rstrip() + "..."
 
@@ -171,6 +172,7 @@ class Notifier:
                     f"   💵 Odd: {odd:.2f} ({_html_escape(bookmaker)})",
                     f"   📈 Value: +{value_pct:.1f}% | EV: R$ {ev:.2f}",
                     f"   📌 Score: {score:.2f}",
+                    f"   ⚠️ Anomalia IA: {_html_escape(llm_anomaly)}" if llm_anomaly else "",
                     f"   🤖 IA: {_html_escape(llm_pick)}" if llm_pick else "",
                     "",
                 ]

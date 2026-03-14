@@ -83,7 +83,7 @@ model:
   # Evita leakage de roster em treino sem historico temporal de jogadores
   use_player_features: false
   # Janela de forma recente (dias)
-  form_window_days: 365
+  form_window_days: 180
   # Calibracao e separacao de probabilidade
   enable_calibration: true
   calibration_method: "sigmoid"
@@ -91,24 +91,27 @@ model:
   calibration_cv_splits: 3
   # Robustez temporal
   holdout_days: 14
-  recency_half_life_days: 120
+  recency_half_life_days: 80
+  enable_hyperparam_tuning: true
+  tuning_max_combinations: 50
+  enable_ensemble: true
   min_train_samples: 120
   min_class_samples: 30
   confidence_auto_tune: true
   confidence_grid: [60, 65, 70, 75, 80]
   coverage_min_holdout: 0.15
-  prediction_temperature: 0.9
+  prediction_temperature: 0.95
   low_data_rank_blend: 0.35
   rank_prior_scale: 12.0
   # Minimo de value (%) pra disparar alerta
-  min_value_pct: 6.0
+  min_value_pct: 5.0
   # Confianca minima do modelo (%) pra considerar
-  min_confidence: 62.0
+  min_confidence: 60.0
   # Thresholds mais rigidos para partidas com pelo menos um time sintetico
-  synthetic_live_min_confidence: 68.0
-  synthetic_live_min_value_pct: 7.0
+  synthetic_live_min_confidence: 66.0
+  synthetic_live_min_value_pct: 6.0
   # Quantidade de melhores partidas para ranking por ciclo
-  top_bets_count: 3
+  top_bets_count: 4
   # Ignora partidas que comecam em ate X minutos (ou que ja iniciaram)
   min_minutes_before_match: 10
 
@@ -116,7 +119,10 @@ model:
 bankroll:
   total: 2000.0          # Banca total (R$)
   max_bet_pct: 3.0        # Maximo % da banca por aposta
-  kelly_fraction: 0.25    # Fracao de Kelly (0.25 = quarter Kelly, conservador)
+  kelly_fraction: 0.28    # Fracao de Kelly base
+  adaptive_kelly: true
+  adaptive_kelly_window_days: 30
+  adaptive_kelly_cache_sec: 120
 
 # Scheduler
 scheduler:
@@ -149,6 +155,8 @@ llm:
   max_calls_per_cycle: 5
   monthly_budget_usd: 2.0
   skip_unchanged_picks: true
+  llm_anomaly_check_enabled: false
+  llm_anomaly_max_checks_per_cycle: 2
   context_recent_matches: 5
   context_include_players: true
   context_include_h2h: true

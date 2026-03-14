@@ -268,7 +268,7 @@ async def analyze_upcoming(
                 odds_filtered_stale += 1
             continue
 
-        score = _score_bet_candidate(prediction, best_vb)
+        score = _score_bet_candidate(prediction, best_vb, match=match)
         best_odd = float(best_vb.get("odds", 0.0))
         candidate = {
             "match": match,
@@ -344,6 +344,13 @@ async def analyze_upcoming(
                 )
                 if llm_text:
                     pick["llm_analysis"] = llm_text
+                anomaly = llm_client.generate_anomaly_flag(
+                    match=pick.get("match", {}),
+                    prediction=pick.get("prediction", {}),
+                    analysis=pick.get("analysis", {}),
+                )
+                if anomaly:
+                    pick["llm_anomaly"] = anomaly
             except Exception as exc:
                 logger.warning("[LLM] Erro gerando analise da partida: %s", exc)
 
@@ -426,8 +433,8 @@ async def analyze_upcoming(
     return value_count
 
 
-def _score_bet_candidate(prediction: dict, analysis_or_best: dict) -> float:
-    """Score conservador orientado a precisão."""
+def _score_bet_candidate(prediction: dict, analysis_or_best: dict, match: dict | None = None) -> float:
+    """Score orientado a precisao com multiplicadores de contexto (tier/formato/lan)."""
     best_vb = analysis_or_best
     if "value_bets" in analysis_or_best:
         best_vb = _best_value_bet(analysis_or_best)
@@ -437,7 +444,29 @@ def _score_bet_candidate(prediction: dict, analysis_or_best: dict) -> float:
     value_pct = max(0.0, float(best_vb.get("value_pct", 0.0)))
     expected_value = max(0.0, float(best_vb.get("expected_value", 0.0)))
     confidence = max(0.0, float(prediction.get("confidence", 0.0)))
-    score = (confidence * 1.4) + (value_pct * 0.8) + (min(expected_value, 30.0) * 0.2)
+    base_score = (confidence * 1.4) + (value_pct * 0.8) + (min(expected_value, 30.0) * 0.2)
+
+    tier = int((match or {}).get("event_tier", 3) or 3)
+    if tier <= 1:
+        tier_mult = 1.08
+    elif tier == 2:
+        tier_mult = 1.04
+    elif tier == 3:
+        tier_mult = 1.00
+    else:
+        tier_mult = 0.96
+
+    best_of = int((match or {}).get("best_of", 1) or 1)
+    if best_of >= 5:
+        format_mult = 1.05
+    elif best_of == 3:
+        format_mult = 1.03
+    else:
+        format_mult = 0.96
+
+    is_lan = bool((match or {}).get("is_lan", 0))
+    lan_mult = 1.03 if is_lan else 1.00
+    score = base_score * tier_mult * format_mult * lan_mult
     return round(score, 4)
 
 
@@ -750,7 +779,7 @@ async def run(config: dict, once: bool = False):
     db = Database(config["database"]["path"])
     features_ext = FeatureExtractor(db, config)
     predictor = Predictor(config)
-    value_detector = ValueDetector(config)
+    value_detector = ValueDetector(config, db=db)
     llm_client = DeepSeekClient(config)
     context_collector = ContextCollector(db, config) if llm_client.is_available else None
     if llm_client.is_available:
