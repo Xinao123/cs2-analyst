@@ -6,3 +6,4 @@
 !.env.example
 data/config.yaml
 data/cs2_analyst.db
+cs2_analyst.log
