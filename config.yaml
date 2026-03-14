@@ -144,7 +144,7 @@ scheduler:
 
 # LLM (DeepSeek V3)
 llm:
-  enabled: false
+  enabled: true
   provider: "deepseek"
   base_url: "https://api.deepseek.com"
   token_env: "DEEPSEEK_API_KEY"
