@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from db.models import Database
+from utils.time_utils import parse_datetime_to_utc, to_storage_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -365,44 +366,29 @@ def _normalize_name(value) -> str:
 
 
 def _parse_datetime(value) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        pass
-
-    for fmt in (
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d",
-        "%d-%m-%Y %H:%M:%S",
-        "%d-%m-%Y",
-    ):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
+    return parse_datetime_to_utc(
+        value,
+        logger=logger,
+        context="daily_top5_audit.parse_datetime",
+    )
 
 
 def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+    parsed = parse_datetime_to_utc(
+        value,
+        logger=logger,
+        context="daily_top5_audit.as_utc",
+    )
+    return parsed if parsed is not None else datetime.now(timezone.utc)
 
 
 def _to_storage_iso(value: datetime) -> str:
     # Keep compatibility with existing DB dates (naive ISO strings).
-    return _as_utc(value).replace(tzinfo=None).isoformat(timespec="seconds")
+    return to_storage_utc_iso(
+        value,
+        logger=logger,
+        context="daily_top5_audit.to_storage_iso",
+    )
 
 
 def _safe_int(value) -> int:

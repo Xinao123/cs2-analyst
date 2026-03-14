@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from db.models import Database
+from utils.time_utils import parse_datetime_to_utc, to_storage_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +232,11 @@ class OddsPapiSync:
                 odds_team2=team2_odds,
                 bookmaker_team1=team1_book,
                 bookmaker_team2=team2_book,
-                updated_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=to_storage_utc_iso(
+                    datetime.now(timezone.utc),
+                    logger=logger,
+                    context="odds.upsert_latest.updated_at",
+                ),
             )
             report["saved"] += 1
             report["matched"] += 1
@@ -579,7 +584,11 @@ class OddsPapiSync:
 
     def _save_snapshots(self, match_id: int, fixture_id: str, quotes: list[dict], swapped: bool) -> int:
         saved = 0
-        collected_at = datetime.now(timezone.utc).isoformat()
+        collected_at = to_storage_utc_iso(
+            datetime.now(timezone.utc),
+            logger=logger,
+            context="odds.save_snapshots.collected_at",
+        )
         for quote in quotes:
             side_home_away = quote.get("side")
             if side_home_away not in ("home", "away"):
@@ -1358,34 +1367,11 @@ def _payload_has_any_price(payload) -> bool:
 
 
 def _parse_datetime(value) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-
-    text = _safe_str(value)
-    if not text:
-        return None
-
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return parsed
-    except ValueError:
-        pass
-
-    for fmt in (
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d",
-        "%d-%m-%Y %H:%M:%S",
-        "%d-%m-%Y",
-    ):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
+    return parse_datetime_to_utc(
+        value,
+        logger=logger,
+        context="odds.parse_datetime",
+    )
 
 
 def _ensure_utc(value: datetime) -> datetime:

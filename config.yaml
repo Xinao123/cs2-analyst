@@ -13,6 +13,8 @@ scraper:
   # Delay entre requests ao HLTV (respeitar rate limit)
   min_delay: 4.0
   max_delay: 10.0
+  # Timezone usada para interpretar payload HLTV sem offset explicito
+  hltv_timezone: "America/Sao_Paulo"
   # Proxy (opcional - recomendado se for scrape pesado)
   proxy_path: ""  # ex: "proxies.txt"
   # Quantos meses de historico buscar no backfill inicial
@@ -117,6 +119,7 @@ bankroll:
 # Scheduler
 scheduler:
   timezone: "America/Sao_Paulo"
+  display_timezone_label: "BRT (Brasília)"
   # Intervalo entre scans de partidas futuras (minutos)
   scan_interval: 60
   # Hora do scrape diario de stats (formato 24h)

@@ -7,6 +7,8 @@ from datetime import datetime
 
 import requests
 
+from utils.time_utils import format_date_for_timezone, format_datetime_for_timezone
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,9 +17,15 @@ class Notifier:
 
     def __init__(self, config: dict):
         tg = config.get("telegram", {})
+        scheduler_cfg = config.get("scheduler", {})
         self.enabled = tg.get("enabled", False)
         self.bot_token = tg.get("bot_token", "")
         self.chat_id = tg.get("chat_id", "")
+        self.display_timezone = str(scheduler_cfg.get("timezone", "America/Sao_Paulo") or "America/Sao_Paulo")
+        self.display_timezone_label = str(
+            scheduler_cfg.get("display_timezone_label", "BRT (Brasília)")
+            or "BRT (Brasília)"
+        )
 
         if self.enabled and self.bot_token.startswith("SEU_"):
             self.enabled = False
@@ -110,7 +118,11 @@ class Notifier:
             t1 = _safe_text(match.get("team1_name", "Team 1"))
             t2 = _safe_text(match.get("team2_name", "Team 2"))
             event = _safe_text(match.get("event_name", ""))
-            when = _format_short_datetime(match.get("date"))
+            when = _format_short_datetime(
+                match.get("date"),
+                tz_name=self.display_timezone,
+                tz_label=self.display_timezone_label,
+            )
             p1 = float(pred.get("team1_win_prob", 50.0))
             p2 = float(pred.get("team2_win_prob", 50.0))
             conf = float(pred.get("confidence", 50.0))
@@ -167,7 +179,7 @@ class Notifier:
     def daily_top5_audit_report(self, summary: dict):
         """Relatorio diario de auditoria do Top 5 oficial."""
         run_date = _safe_text(summary.get("run_date"))
-        run_date_fmt = _format_date_only(run_date) if run_date else "data indefinida"
+        run_date_fmt = _format_date_only(run_date, tz_name=self.display_timezone) if run_date else "data indefinida"
 
         if not summary.get("found"):
             self._send(
@@ -266,45 +278,30 @@ def _safe_text(value) -> str:
     return str(value).strip()
 
 
-def _format_short_datetime(value) -> str:
+def _format_short_datetime(
+    value,
+    tz_name: str = "America/Sao_Paulo",
+    tz_label: str = "BRT (Brasília)",
+) -> str:
     text = _safe_text(value)
     if not text:
         return "Data indefinida"
-
-    parsed = None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if parsed.tzinfo:
-            parsed = parsed.astimezone().replace(tzinfo=None)
-    except ValueError:
-        pass
-
-    if parsed is None:
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
-            try:
-                parsed = datetime.strptime(text, fmt)
-                break
-            except ValueError:
-                continue
-
-    if parsed is None:
-        return text
-    return parsed.strftime("%d/%m %H:%M")
+    return format_datetime_for_timezone(
+        text,
+        tz_name=tz_name,
+        fmt="%d/%m %H:%M",
+        tz_suffix=tz_label,
+        logger=logger,
+    )
 
 
-def _format_date_only(value) -> str:
+def _format_date_only(value, tz_name: str = "America/Sao_Paulo") -> str:
     text = _safe_text(value)
     if not text:
         return "Data indefinida"
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return parsed.strftime("%d/%m/%Y")
-    except ValueError:
-        pass
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
-        try:
-            parsed = datetime.strptime(text, fmt)
-            return parsed.strftime("%d/%m/%Y")
-        except ValueError:
-            continue
-    return text
+    return format_date_for_timezone(
+        text,
+        tz_name=tz_name,
+        fmt="%d/%m/%Y",
+        logger=logger,
+    )

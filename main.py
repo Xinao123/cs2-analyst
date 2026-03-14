@@ -25,7 +25,7 @@ import signal
 import asyncio
 import logging
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import yaml
 
@@ -37,6 +37,7 @@ from analysis.predictor import Predictor
 from analysis.value import ValueDetector
 from analysis.daily_top5_audit import DailyTop5Auditor
 from alerts.telegram import Notifier
+from utils.time_utils import parse_datetime_to_utc
 
 # ============================================================
 # Logging
@@ -132,8 +133,8 @@ async def analyze_upcoming(
     form_window_days = max(1, int(model_cfg.get("form_window_days", 365)))
     max_pick_odds_age_minutes = max(1, int(odds_cfg.get("max_pick_odds_age_minutes", 120)))
 
-    now_dt = datetime.now()
-    min_start_cutoff = datetime.now() + timedelta(minutes=min_minutes_before_match)
+    now_dt = datetime.now(timezone.utc)
+    min_start_cutoff = now_dt + timedelta(minutes=min_minutes_before_match)
     approved_candidates: list[dict] = []
     with_odds_analyzed = 0
     with_odds_approved = 0
@@ -458,29 +459,11 @@ def _safe_float(value) -> float:
 
 
 def _parse_datetime(value) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if parsed.tzinfo:
-            parsed = parsed.astimezone().replace(tzinfo=None)
-        return parsed
-    except ValueError:
-        pass
-
-    for date_fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(text, date_fmt)
-        except ValueError:
-            continue
-    return None
+    return parse_datetime_to_utc(
+        value,
+        logger=logger,
+        context="main.parse_datetime",
+    )
 
 
 def _is_synthetic_match(match: dict) -> bool:
@@ -529,7 +512,7 @@ def _is_odds_fresh(odds_updated_at, max_age_minutes: int, now_dt: datetime | Non
     if not updated_dt:
         return False
 
-    now_dt = now_dt or datetime.now()
+    now_dt = now_dt or datetime.now(timezone.utc)
     age_min = (now_dt - updated_dt).total_seconds() / 60.0
     if age_min < 0:
         return True
@@ -593,6 +576,27 @@ async def bootstrap_train_data(config: dict) -> dict:
     finally:
         await scraper.close()
     return report
+
+
+async def reset_upcoming_timezone_data(config: dict) -> dict:
+    """Limpa dados dependentes de upcoming e recarrega com timezone corrigido."""
+    db = Database(config["database"]["path"])
+    cleanup = db.clear_upcoming_related_data()
+
+    scraper = HLTVScraper(db, config)
+    try:
+        saved_upcoming = await scraper.scrape_upcoming_matches()
+    finally:
+        await scraper.close()
+
+    odds_sync = OddsPapiSync(db, config)
+    odds_report = await asyncio.to_thread(odds_sync.sync_upcoming_odds) if odds_sync.enabled else {"saved": 0}
+    return {
+        "cleanup": cleanup,
+        "saved_upcoming": int(saved_upcoming),
+        "odds_saved": int(odds_report.get("saved", 0)),
+        "odds_error": str(odds_report.get("error", "")),
+    }
 
 
 def train_model(db: Database, config: dict, notifier: Notifier) -> dict:
@@ -843,6 +847,11 @@ def main():
         action="store_true",
         help="Bootstrap agressivo de historico PandaScore para treino",
     )
+    parser.add_argument(
+        "--reset-upcoming-timezone-data",
+        action="store_true",
+        help="Limpa upcoming/odds/predictions dependentes e recarrega com timezone corrigido",
+    )
     parser.add_argument("--stats", action="store_true", help="Mostra stats do banco")
     args = parser.parse_args()
 
@@ -857,6 +866,20 @@ def main():
         print(f"   descartadas: {report.get('discarded', 0)}")
         if report.get("error"):
             print(f"   aviso: {report.get('error')}")
+        return
+
+    if args.reset_upcoming_timezone_data:
+        report = asyncio.run(reset_upcoming_timezone_data(config))
+        cleanup = report.get("cleanup", {})
+        print("\n🧹 Saneamento timezone de upcoming")
+        print(f"   matches_upcoming_removidas: {cleanup.get('matches_deleted', 0)}")
+        print(f"   odds_latest_removidas: {cleanup.get('odds_latest_deleted', 0)}")
+        print(f"   odds_snapshots_removidas: {cleanup.get('odds_snapshots_deleted', 0)}")
+        print(f"   predictions_removidas: {cleanup.get('predictions_deleted', 0)}")
+        print(f"   upcoming_recarregadas: {report.get('saved_upcoming', 0)}")
+        print(f"   odds_recarregadas: {report.get('odds_saved', 0)}")
+        if report.get("odds_error"):
+            print(f"   aviso_odds: {report.get('odds_error')}")
         return
 
     if args.stats:

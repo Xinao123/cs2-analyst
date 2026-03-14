@@ -9,7 +9,8 @@ A lógica:
 
 import logging
 import math
-from datetime import datetime
+
+from utils.time_utils import format_datetime_for_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,18 @@ class ValueDetector:
     def __init__(self, config: dict):
         model_cfg = config.get("model", {})
         bankroll_cfg = config.get("bankroll", {})
+        scheduler_cfg = config.get("scheduler", {})
 
         self.min_value_pct = model_cfg.get("min_value_pct", 4.0)
         self.min_confidence = model_cfg.get("min_confidence", 55.0)
         self.bankroll = bankroll_cfg.get("total", 2000.0)
         self.max_bet_pct = bankroll_cfg.get("max_bet_pct", 3.0)
         self.kelly_fraction = bankroll_cfg.get("kelly_fraction", 0.25)
+        self.display_timezone = str(scheduler_cfg.get("timezone", "America/Sao_Paulo") or "America/Sao_Paulo")
+        self.display_timezone_label = str(
+            scheduler_cfg.get("display_timezone_label", "BRT (Brasília)")
+            or "BRT (Brasília)"
+        )
 
     def analyze(
         self,
@@ -224,26 +231,13 @@ class ValueDetector:
         text = str(value).strip()
         if not text:
             return "Data indefinida"
-
-        parsed = None
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            if parsed.tzinfo:
-                parsed = parsed.astimezone().replace(tzinfo=None)
-        except ValueError:
-            pass
-
-        if parsed is None:
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
-                try:
-                    parsed = datetime.strptime(text, fmt)
-                    break
-                except ValueError:
-                    continue
-
-        if parsed is None:
-            return text
-        return parsed.strftime("%d/%m/%Y %H:%M")
+        return format_datetime_for_timezone(
+            text,
+            tz_name=self.display_timezone,
+            fmt="%d/%m/%Y %H:%M",
+            tz_suffix=self.display_timezone_label,
+            logger=logger,
+        )
 
 
 def _expected_value(prob: float, odds: float, stake: float) -> float:

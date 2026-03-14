@@ -18,6 +18,11 @@ from pathlib import Path
 import requests
 
 from db.models import Database
+from utils.time_utils import (
+    parse_date_time_to_utc,
+    to_storage_utc_datetime,
+    to_storage_utc_iso,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +117,7 @@ class HLTVScraper:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         )
         self.referer = scraper_cfg.get("referer", "https://www.hltv.org/stats")
-        self.hltv_timezone = scraper_cfg.get("hltv_timezone", "Europe/Copenhagen")
+        self.hltv_timezone = scraper_cfg.get("hltv_timezone", "America/Sao_Paulo")
         self.cookie = scraper_cfg.get("cookie", "")
         extra_headers = scraper_cfg.get("extra_headers", {})
         self.extra_headers = extra_headers if isinstance(extra_headers, dict) else {}
@@ -708,7 +713,11 @@ class HLTVScraper:
 
         return {
             "match_id": match_id,
-            "date": _normalize_match_datetime(match.get("date"), match.get("time")),
+            "date": _normalize_match_datetime(
+                match.get("date"),
+                match.get("time"),
+                assume_tz=self.hltv_timezone,
+            ),
             "event_name": _safe_str(match.get("event")),
             "best_of": _parse_best_of(match.get("bestOf", match.get("maps", 1))),
             "team1_id": team1_id,
@@ -743,7 +752,7 @@ class HLTVScraper:
 
         return {
             "match_id": _synthetic_provider_match_id(provider_match_id),
-            "date": _normalize_match_datetime(raw_date),
+            "date": _normalize_match_datetime(raw_date, assume_tz="UTC"),
             "event_name": event_name,
             "best_of": _parse_best_of(match.get("number_of_games", match.get("best_of", 1))),
             "team1_id": _safe_int(teams[0].get("id")),
@@ -785,7 +794,10 @@ class HLTVScraper:
 
         return {
             "match_id": match_id,
-            "date": _normalize_match_datetime(match.get("date")),
+            "date": _normalize_match_datetime(
+                match.get("date"),
+                assume_tz=self.hltv_timezone,
+            ),
             "event_name": _safe_str(match.get("event")),
             "team1_id": team1_id,
             "team2_id": team2_id,
@@ -906,8 +918,8 @@ class HLTVScraper:
         self.db.upsert_team(team_id, safe_name, ranking=9999 if team_id < 0 else 0)
 
     def _is_within_upcoming_window(self, date_value: datetime) -> bool:
-        now = datetime.utcnow() - timedelta(hours=1)
-        latest = datetime.utcnow() + timedelta(days=self.upcoming_days_ahead)
+        now = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
+        latest = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=self.upcoming_days_ahead)
         return now <= date_value <= latest
 
     # ============================================================
@@ -1389,7 +1401,7 @@ class HLTVScraper:
             "match_id": _synthetic_provider_match_id(provider_match_id),
             "provider_match_id": provider_match_id,
             "status": _safe_str(match.get("status")),
-            "date": _normalize_match_datetime(raw_date),
+            "date": _normalize_match_datetime(raw_date, assume_tz="UTC"),
             "event_name": event_name,
             "best_of": _parse_best_of(match.get("number_of_games", match.get("best_of", 1))),
             "team1_source_id": source_t1,
@@ -1628,61 +1640,33 @@ def _parse_result(result_str: str, team1_id: int, team2_id: int):
     return t1_score, t2_score, winner
 
 
-def _normalize_match_datetime(date_val, time_val=None) -> str:
+def _normalize_match_datetime(date_val, time_val=None, assume_tz: str | None = None) -> str:
     date_text = _safe_str(date_val)
     time_text = _safe_str(time_val)
 
     if not date_text or date_text.upper() == "LIVE":
-        return datetime.now().isoformat(timespec="seconds")
+        return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
 
-    # Ja veio em ISO ou datetime parseavel
-    try:
-        parsed = datetime.fromisoformat(date_text.replace("Z", "+00:00"))
-        if parsed.tzinfo:
-            parsed = parsed.replace(tzinfo=None)
-        if time_text and parsed.hour == 0 and parsed.minute == 0:
-            parsed_time = _parse_time(time_text)
-            if parsed_time:
-                parsed = parsed.replace(hour=parsed_time.hour, minute=parsed_time.minute, second=0)
-        return parsed.isoformat(timespec="seconds")
-    except ValueError:
-        pass
-
-    # Formatos comuns da lib (ex: 12-03-2026 + 14:30)
-    for date_fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            parsed = datetime.strptime(date_text, date_fmt)
-            parsed_time = _parse_time(time_text)
-            if parsed_time:
-                parsed = parsed.replace(hour=parsed_time.hour, minute=parsed_time.minute, second=0)
-            return parsed.isoformat(timespec="seconds")
-        except ValueError:
-            continue
+    parsed_utc = parse_date_time_to_utc(
+        date_text,
+        time_text,
+        assume_tz=assume_tz,
+        logger=logger,
+        context="hltv.normalize_match_datetime",
+    )
+    if parsed_utc:
+        return to_storage_utc_iso(parsed_utc, logger=logger, context="hltv.normalize_match_datetime")
 
     # Se nao reconheceu, preserva o valor original para nao perder informacao.
     return date_text
 
 
 def _parse_datetime(value) -> datetime | None:
-    text = _safe_str(value)
-    if not text:
-        return None
-
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if parsed.tzinfo:
-            parsed = parsed.replace(tzinfo=None)
-        return parsed
-    except ValueError:
-        pass
-
-    for date_fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(text, date_fmt)
-        except ValueError:
-            continue
-
-    return None
+    return to_storage_utc_datetime(
+        value,
+        logger=logger,
+        context="hltv.parse_datetime",
+    )
 
 
 def _parse_time(time_text: str) -> datetime | None:

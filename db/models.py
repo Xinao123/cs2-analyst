@@ -15,6 +15,8 @@ from pathlib import Path
 from datetime import datetime, date, timedelta
 from contextlib import contextmanager
 
+from utils.time_utils import to_storage_utc_datetime
+
 logger = logging.getLogger(__name__)
 
 SCHEMA = """
@@ -395,6 +397,49 @@ class Database:
                    ORDER BY m.date ASC"""
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def clear_upcoming_related_data(self) -> dict:
+        """
+        Remove dados dependentes de partidas futuras.
+
+        Uso recomendado para saneamento de timezone: limpar e recarregar upcoming.
+        """
+        with self.connect() as conn:
+            rows = conn.execute("SELECT id FROM matches WHERE status='upcoming'").fetchall()
+            match_ids = [int(r["id"]) for r in rows]
+
+            if not match_ids:
+                return {
+                    "matches_deleted": 0,
+                    "odds_latest_deleted": 0,
+                    "odds_snapshots_deleted": 0,
+                    "predictions_deleted": 0,
+                }
+
+            placeholders = ",".join(["?"] * len(match_ids))
+            odds_snapshots_deleted = conn.execute(
+                f"DELETE FROM odds_snapshots WHERE match_id IN ({placeholders})",
+                match_ids,
+            ).rowcount
+            odds_latest_deleted = conn.execute(
+                f"DELETE FROM match_odds_latest WHERE match_id IN ({placeholders})",
+                match_ids,
+            ).rowcount
+            predictions_deleted = conn.execute(
+                f"DELETE FROM predictions WHERE match_id IN ({placeholders})",
+                match_ids,
+            ).rowcount
+            matches_deleted = conn.execute(
+                f"DELETE FROM matches WHERE id IN ({placeholders})",
+                match_ids,
+            ).rowcount
+
+            return {
+                "matches_deleted": int(matches_deleted or 0),
+                "odds_latest_deleted": int(odds_latest_deleted or 0),
+                "odds_snapshots_deleted": int(odds_snapshots_deleted or 0),
+                "predictions_deleted": int(predictions_deleted or 0),
+            }
 
     def get_team_recent_matches(
         self, team_id: int, limit: int = 20, days: int = 90
@@ -900,29 +945,11 @@ class Database:
 
 
 def _parse_dt(value) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        text = str(value).strip()
-        if not text:
-            return None
-        try:
-            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        except ValueError:
-            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y"):
-                try:
-                    dt = datetime.strptime(text, fmt)
-                    break
-                except ValueError:
-                    continue
-            else:
-                return None
-
-    if dt.tzinfo:
-        dt = dt.astimezone().replace(tzinfo=None)
-    return dt
+    return to_storage_utc_datetime(
+        value,
+        logger=logger,
+        context="db.parse_dt",
+    )
 
 
 def _safe_int(value) -> int:
