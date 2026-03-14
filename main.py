@@ -37,6 +37,8 @@ from analysis.predictor import Predictor
 from analysis.value import ValueDetector
 from analysis.daily_top5_audit import DailyTop5Auditor
 from alerts.telegram import Notifier
+from ai.context import ContextCollector
+from ai.llm import DeepSeekClient
 from utils.time_utils import parse_datetime_to_utc
 
 # ============================================================
@@ -87,6 +89,8 @@ async def analyze_upcoming(
     notifier: Notifier,
     config: dict,
     daily_auditor: DailyTop5Auditor | None = None,
+    llm_client: DeepSeekClient | None = None,
+    context_collector: ContextCollector | None = None,
 ) -> int:
     """
     Analisa partidas futuras e separa as melhores oportunidades para aposta.
@@ -268,6 +272,7 @@ async def analyze_upcoming(
         best_odd = float(best_vb.get("odds", 0.0))
         candidate = {
             "match": match,
+            "features": features,
             "prediction": prediction,
             "analysis": analysis,
             "score": score,
@@ -322,6 +327,25 @@ async def analyze_upcoming(
                 capture.get("run_date"),
                 capture.get("status"),
             )
+
+    if llm_client and llm_client.is_available and context_collector:
+        for pick in top_picks:
+            if llm_client.calls_this_cycle >= llm_client.max_calls:
+                logger.info("[LLM] Limite por ciclo atingido (%s chamadas).", llm_client.max_calls)
+                break
+            try:
+                ctx = context_collector.collect(pick.get("match", {}))
+                llm_text = llm_client.generate_match_analysis(
+                    match=pick.get("match", {}),
+                    features=pick.get("features", {}),
+                    prediction=pick.get("prediction", {}),
+                    analysis=pick.get("analysis", {}),
+                    context_text=ctx,
+                )
+                if llm_text:
+                    pick["llm_analysis"] = llm_text
+            except Exception as exc:
+                logger.warning("[LLM] Erro gerando analise da partida: %s", exc)
 
     notifier.top_picks_alert(
         top_picks,
@@ -727,7 +751,18 @@ async def run(config: dict, once: bool = False):
     features_ext = FeatureExtractor(db, config)
     predictor = Predictor(config)
     value_detector = ValueDetector(config)
-    notifier = Notifier(config)
+    llm_client = DeepSeekClient(config)
+    context_collector = ContextCollector(db, config) if llm_client.is_available else None
+    if llm_client.is_available:
+        logger.info(
+            "[LLM] DeepSeek habilitada (model=%s budget=$%.2f/mensal).",
+            llm_client.model,
+            llm_client.monthly_budget,
+        )
+    else:
+        logger.info("[LLM] Desabilitada ou indisponivel. Fluxo segue em modo template.")
+
+    notifier = Notifier(config, llm_client=llm_client)
     odds_sync = OddsPapiSync(db, config)
     daily_auditor = DailyTop5Auditor(db, config, notifier)
     history_scraper = HLTVScraper(db, config)
@@ -764,6 +799,8 @@ async def run(config: dict, once: bool = False):
     while _running:
         try:
             now = datetime.now()
+            if llm_client.is_available:
+                llm_client.reset_cycle_counter()
 
             # AtualizaÃ§Ã£o diÃ¡ria de dados (ranking, stats)
             if last_daily_update != now.date() and now.hour >= daily_hour:
@@ -838,6 +875,8 @@ async def run(config: dict, once: bool = False):
                 notifier,
                 config,
                 daily_auditor=daily_auditor,
+                llm_client=llm_client,
+                context_collector=context_collector,
             )
 
             if once:

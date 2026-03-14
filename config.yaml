@@ -5,6 +5,8 @@
 # Telegram
 telegram:
   enabled: true
+  bot_token_env: "TELEGRAM_BOT_TOKEN"
+  chat_id_env: "TELEGRAM_CHAT_ID"
   bot_token: "8340705505:AAEAyTertkpSQMqFATWwG4vzY_DEKQ5QCS8"
   chat_id: "5496924490"
 
@@ -129,3 +131,25 @@ scheduler:
   daily_audit_minute: 30
   audit_match_window_hours: 6
   audit_pending_max_days: 3
+
+# LLM (DeepSeek V3)
+llm:
+  enabled: false
+  provider: "deepseek"
+  base_url: "https://api.deepseek.com"
+  token_env: "DEEPSEEK_API_KEY"
+  model: "deepseek-chat"
+  max_tokens: 400
+  temperature: 0.3
+  timeout_sec: 25
+  retry_count: 2
+  retry_backoff_sec: 3
+  fallback_to_template: true
+  cache_ttl_minutes: 60
+  max_calls_per_cycle: 5
+  monthly_budget_usd: 2.0
+  skip_unchanged_picks: true
+  context_recent_matches: 5
+  context_include_players: true
+  context_include_h2h: true
+  context_include_map_pool: true

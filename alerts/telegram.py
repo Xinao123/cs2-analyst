@@ -3,11 +3,16 @@ Telegram Alerts - Envia analises e value bets via Telegram.
 """
 
 import logging
+import os
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import requests
 
 from utils.time_utils import format_date_for_timezone, format_datetime_for_timezone
+
+if TYPE_CHECKING:
+    from ai.llm import DeepSeekClient
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +20,19 @@ logger = logging.getLogger(__name__)
 class Notifier:
     """Notificacoes via Telegram."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, llm_client: "DeepSeekClient | None" = None):
         tg = config.get("telegram", {})
         scheduler_cfg = config.get("scheduler", {})
         self.enabled = tg.get("enabled", False)
-        self.bot_token = tg.get("bot_token", "")
-        self.chat_id = tg.get("chat_id", "")
+        bot_token_env = str(tg.get("bot_token_env", "") or "")
+        chat_id_env = str(tg.get("chat_id_env", "") or "")
+        self.bot_token = str(tg.get("bot_token", "") or "")
+        self.chat_id = str(tg.get("chat_id", "") or "")
+        if bot_token_env:
+            self.bot_token = self.bot_token or os.getenv(bot_token_env, "")
+        if chat_id_env:
+            self.chat_id = self.chat_id or os.getenv(chat_id_env, "")
+        self.llm = llm_client
         self.display_timezone = str(scheduler_cfg.get("timezone", "America/Sao_Paulo") or "America/Sao_Paulo")
         self.display_timezone_label = str(
             scheduler_cfg.get("display_timezone_label", "BRT (Brasília)")
@@ -61,14 +73,17 @@ class Notifier:
             f"🤖 Analisando..."
         )
 
-    def value_bet_alert(self, report: str, match: dict):
+    def value_bet_alert(self, report: str, match: dict, llm_analysis: str | None = None):
         """Envia alerta de value bet."""
         now = datetime.now().strftime("%H:%M")
-        self._send(
+        text = (
             f"🔔 <b>VALUE BET DETECTADO</b> - {now}\n"
             f"{'━' * 30}\n\n"
             f"{_html_escape(report)}"
         )
+        if llm_analysis:
+            text += f"\n\n🤖 <b>Análise IA:</b>\n{_html_escape(llm_analysis)}"
+        self._send(text)
 
     def prediction_alert(self, report: str, match: dict):
         """Envia predicao sem value (informativo)."""
@@ -142,6 +157,9 @@ class Notifier:
             value_pct = float(best_vb.get("value_pct", 0.0))
             ev = float(best_vb.get("expected_value", 0.0))
             bookmaker = _safe_text(best_vb.get("bookmaker", "N/D"))
+            llm_pick = _safe_text(item.get("llm_analysis", ""))
+            if llm_pick and len(llm_pick) > 320:
+                llm_pick = llm_pick[:317].rstrip() + "..."
 
             lines.extend(
                 [
@@ -153,9 +171,19 @@ class Notifier:
                     f"   💵 Odd: {odd:.2f} ({_html_escape(bookmaker)})",
                     f"   📈 Value: +{value_pct:.1f}% | EV: R$ {ev:.2f}",
                     f"   📌 Score: {score:.2f}",
+                    f"   🤖 IA: {_html_escape(llm_pick)}" if llm_pick else "",
                     "",
                 ]
             )
+
+        if self.llm and self.llm.is_available and picks:
+            try:
+                llm_text = self.llm.generate_top_picks_report(picks, total_candidates)
+                if llm_text:
+                    lines.append("🤖 <b>Análise IA:</b>")
+                    lines.append(_html_escape(llm_text))
+            except Exception as exc:
+                logger.warning("[TG] Erro na analise LLM: %s", exc)
 
         self._send("\n".join(lines).rstrip())
 
@@ -248,6 +276,17 @@ class Notifier:
 
         lines.append("")
         lines.append(f"📌 Total auditado: {total}")
+
+        if self.llm and self.llm.is_available and summary.get("found"):
+            try:
+                llm_text = self.llm.generate_audit_report(summary)
+                if llm_text:
+                    lines.append("")
+                    lines.append("🤖 <b>Análise IA:</b>")
+                    lines.append(_html_escape(llm_text))
+            except Exception as exc:
+                logger.warning("[TG] Erro na analise LLM da auditoria: %s", exc)
+
         self._send("\n".join(lines))
 
     def model_trained(self, metrics: dict):
