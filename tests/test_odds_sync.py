@@ -71,6 +71,20 @@ class OddsSyncTests(unittest.TestCase):
         self.assertIsNotNone(match_data)
         self.assertTrue(swapped)
 
+    def test_matching_fallback_by_name_similarity_when_exact_key_missing(self):
+        upcoming = self.db.get_upcoming_matches()
+        indexed = _index_local_matches(upcoming)
+        fixture = {
+            "fixture_id": "fx-1b",
+            "home_name": "FURIA Esports",
+            "away_name": "TYLOO Gaming",
+            "event_name": "ESL Pro League Group",
+            "start_dt": self.local_match_dt + timedelta(minutes=20),
+        }
+        match_data, swapped = self.sync._match_fixture_to_local(fixture, indexed, set())
+        self.assertIsNotNone(match_data)
+        self.assertFalse(swapped)
+
     def test_best_line_uses_whitelist_and_highest_odds(self):
         quotes = [
             {"bookmaker": "bet365", "side": "home", "odds": 1.87, "market_key": "h2h", "changed_at": ""},
@@ -185,6 +199,42 @@ class OddsSyncTests(unittest.TestCase):
         quotes = _extract_bookmaker_quotes(payload, fixture)
         self.assertEqual(2, len(quotes))
         self.assertEqual({"home", "away"}, {q["side"] for q in quotes})
+
+    def test_extract_quotes_from_mixed_price_shapes_keeps_h2h_filter(self):
+        fixture = {
+            "fixture_id": "9994",
+            "home_name": "FURIA",
+            "away_name": "TYLOO",
+            "home_id": "1",
+            "away_id": "2",
+            "start_dt": datetime.now(timezone.utc) + timedelta(hours=2),
+            "event_name": "ESL Pro League",
+        }
+        payload = {
+            "bookmakerOdds": {
+                "pinnacle": {
+                    "markets": {
+                        "h2h": {
+                            "outcomes": {
+                                "1": {"name": "FURIA", "price": {"decimal": "1.92"}},
+                                "2": {"name": "TYLOO", "prices": [{"value": "2.03"}]},
+                            }
+                        },
+                        "totals": {
+                            "name": "Total rounds over/under",
+                            "outcomes": {
+                                "over": {"name": "Over 26.5", "price": 1.88},
+                                "under": {"name": "Under 26.5", "price": 1.92},
+                            },
+                        },
+                    }
+                }
+            }
+        }
+        quotes = _extract_bookmaker_quotes(payload, fixture)
+        self.assertEqual(2, len(quotes))
+        self.assertEqual({"home", "away"}, {q["side"] for q in quotes})
+        self.assertTrue(all(q["market_key"] == "h2h" for q in quotes))
 
     def test_sport_score_prefers_counter_strike(self):
         cs_score = _score_sport_name("Counter-Strike 2 Esports")

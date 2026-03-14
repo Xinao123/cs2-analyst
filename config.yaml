@@ -55,7 +55,7 @@ odds:
   market: "h2h"
   days_ahead: 4
   refresh_minutes: 30
-  match_window_hours: 6
+  match_window_hours: 8
   # false = sincroniza odds apenas no inicio de cada ciclo principal
   sync_during_wait: false
   timeout_sec: 15
@@ -71,7 +71,7 @@ model:
   # Minimo de partidas do time pra considerar nas features
   min_matches: 0
   # Minimo de jogos recentes por time na inferencia ao vivo
-  live_min_recent_matches: 2
+  live_min_recent_matches: 1
   # Minimo de jogos recentes por time no treino
   train_min_recent_matches: 0
   # Filtros conservadores de qualidade

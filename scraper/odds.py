@@ -18,6 +18,7 @@ import re
 import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 
 import requests
 
@@ -181,9 +182,9 @@ class OddsPapiSync:
                     report["reasons"]["payload_invalido"] += 1
                     if payload_invalid_logged < 3:
                         logger.debug(
-                            "[ODDS][oddspapi] payload sem quotes fixture=%s shape=%s",
+                            "[ODDS][oddspapi] payload sem quotes fixture=%s %s",
                             fixture_id,
-                            _payload_shape_summary(odds_payload),
+                            _payload_debug_summary(odds_payload),
                         )
                         payload_invalid_logged += 1
                 else:
@@ -490,48 +491,93 @@ class OddsPapiSync:
             return None, False
 
         pair_key = tuple(sorted((home_norm, away_norm)))
-        candidates = indexed_matches.get(pair_key, [])
+        exact_candidates = indexed_matches.get(pair_key, [])
+        best_item, best_swapped, _ = self._pick_best_candidate(
+            fixture=fixture,
+            candidates=exact_candidates,
+            used_match_ids=used_match_ids,
+            allow_fuzzy=False,
+        )
+        if best_item:
+            return best_item, best_swapped
+
+        # Fallback moderado: similaridade de nomes + evento + proximidade horaria.
+        fallback_candidates = _flatten_indexed_matches(indexed_matches)
+        best_item, best_swapped, best_score = self._pick_best_candidate(
+            fixture=fixture,
+            candidates=fallback_candidates,
+            used_match_ids=used_match_ids,
+            allow_fuzzy=True,
+        )
+        if best_item and best_score >= 2.10:
+            return best_item, best_swapped
+        return None, False
+
+    def _pick_best_candidate(
+        self,
+        fixture: dict,
+        candidates: list[dict],
+        used_match_ids: set[int],
+        allow_fuzzy: bool = False,
+    ) -> tuple[dict | None, bool, float]:
         if not candidates:
-            return None, False
+            return None, False, float("-inf")
+
+        fixture_dt = fixture.get("start_dt")
+        home_raw = _safe_str(fixture.get("home_name", ""))
+        away_raw = _safe_str(fixture.get("away_name", ""))
+        home_norm = _normalize_team_name(home_raw)
+        away_norm = _normalize_team_name(away_raw)
 
         best_item = None
         best_score = float("-inf")
         best_swapped = False
-        fixture_dt = fixture.get("start_dt")
 
         for match in candidates:
             match_id = _safe_int(match.get("id"))
             if match_id <= 0 or match_id in used_match_ids:
                 continue
 
-            local_t1 = _normalize_team_name(match.get("team1_name", ""))
-            local_t2 = _normalize_team_name(match.get("team2_name", ""))
+            local_t1_raw = _safe_str(match.get("team1_name", ""))
+            local_t2_raw = _safe_str(match.get("team2_name", ""))
+            local_t1 = _normalize_team_name(local_t1_raw)
+            local_t2 = _normalize_team_name(local_t2_raw)
             if not local_t1 or not local_t2:
                 continue
 
-            swapped = local_t1 == away_norm and local_t2 == home_norm
-            aligned = local_t1 == home_norm and local_t2 == away_norm
-
             score = 0.0
-            if aligned:
-                score += 2.0
-            elif swapped:
-                score += 1.0
+            swapped = False
+            if allow_fuzzy:
+                aligned_team_score = (_team_similarity(home_raw, local_t1_raw) + _team_similarity(away_raw, local_t2_raw)) / 2.0
+                swapped_team_score = (_team_similarity(home_raw, local_t2_raw) + _team_similarity(away_raw, local_t1_raw)) / 2.0
+                best_team_score = max(aligned_team_score, swapped_team_score)
+                if best_team_score < 0.58:
+                    continue
+                swapped = swapped_team_score > aligned_team_score
+                score += best_team_score * 2.0
+            else:
+                aligned = local_t1 == home_norm and local_t2 == away_norm
+                swapped = local_t1 == away_norm and local_t2 == home_norm
+                if not aligned and not swapped:
+                    continue
+                score += 2.20 if aligned else 1.60
 
             local_dt = _parse_datetime(match.get("date"))
             if fixture_dt and local_dt:
                 diff_hours = abs((_ensure_utc(local_dt) - _ensure_utc(fixture_dt)).total_seconds()) / 3600.0
                 if diff_hours > self.match_window_hours:
                     continue
-                score += max(0.0, 1.5 - (diff_hours / max(self.match_window_hours, 1)))
+                score += max(0.0, 1.6 - (diff_hours / max(self.match_window_hours, 1)))
 
-            score += _event_similarity_score(fixture.get("event_name", ""), match.get("event_name", ""))
+            event_sim = _event_similarity_score(fixture.get("event_name", ""), match.get("event_name", ""))
+            score += event_sim
+
             if score > best_score:
                 best_score = score
                 best_item = match
                 best_swapped = swapped
 
-        return best_item, best_swapped
+        return best_item, best_swapped, best_score
 
     def _is_within_window(self, dt_value: datetime) -> bool:
         now = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -638,6 +684,24 @@ def _index_local_matches(matches: list[dict]) -> dict[tuple[str, str], list[dict
     return out
 
 
+def _flatten_indexed_matches(indexed: dict[tuple[str, str], list[dict]]) -> list[dict]:
+    out: list[dict] = []
+    seen_ids: set[int] = set()
+    for matches in indexed.values():
+        if not isinstance(matches, list):
+            continue
+        for match in matches:
+            if not isinstance(match, dict):
+                continue
+            match_id = _safe_int(match.get("id"))
+            if match_id > 0 and match_id in seen_ids:
+                continue
+            if match_id > 0:
+                seen_ids.add(match_id)
+            out.append(match)
+    return out
+
+
 def _extract_bookmaker_quotes(payload: dict | list | None, fixture: dict) -> list[dict]:
     if payload is None:
         return []
@@ -724,7 +788,7 @@ def _extract_bookmaker_quotes(payload: dict | list | None, fixture: dict) -> lis
 
 def _extract_root_blocks(payload: dict | list) -> list:
     if isinstance(payload, list):
-        return payload
+        return [item for item in payload if isinstance(item, dict)]
     if not isinstance(payload, dict):
         return []
 
@@ -732,65 +796,171 @@ def _extract_root_blocks(payload: dict | list) -> list:
     if isinstance(bookmaker_odds, dict):
         out = []
         for bookmaker_name, markets in bookmaker_odds.items():
-            market_block = markets
-            if isinstance(market_block, dict) and isinstance(market_block.get("markets"), dict):
-                market_block = market_block.get("markets")
-            out.append({"bookmakerName": _safe_str(bookmaker_name), "markets": market_block})
+            block = {"bookmakerName": _safe_str(bookmaker_name)}
+            if isinstance(markets, dict):
+                block.update(markets)
+                if "markets" not in block:
+                    block["markets"] = markets.get(
+                        "marketOdds",
+                        markets.get("odds", markets),
+                    )
+            elif isinstance(markets, list):
+                block["markets"] = markets
+            else:
+                block["markets"] = {"h2h": markets}
+            out.append(block)
         if out:
             return out
 
-    for key in ("data", "results", "items", "bookmakerOdds", "bookmakers", "odds"):
+    if isinstance(bookmaker_odds, list):
+        out = [item for item in bookmaker_odds if isinstance(item, dict)]
+        if out:
+            return out
+
+    for key in ("data", "results", "items", "bookmakers", "odds"):
         value = payload.get(key)
         if isinstance(value, list):
-            return value
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            mapped = []
+            for bookmaker_name, item in value.items():
+                if not isinstance(item, dict):
+                    continue
+                copied = dict(item)
+                copied.setdefault("bookmakerName", _safe_str(bookmaker_name))
+                mapped.append(copied)
+            if mapped:
+                return mapped
+
+    if any(key in payload for key in ("markets", "marketOdds", "odds", "outcomes", "prices")):
+        return [payload]
     return []
 
 
 def _extract_markets(block: dict) -> list:
-    for key in ("markets", "marketOdds", "market_odds"):
-        value = block.get(key)
-        if isinstance(value, list):
-            return value
-        if isinstance(value, dict):
-            if isinstance(value.get("markets"), dict):
-                value = value.get("markets")
-            # Dict payload (OddsPapi v4): {"h2h": {...}} or {"101": {...}}
-            if any(isinstance(v, dict) for v in value.values()):
-                return [{"marketKey": str(k), **(v if isinstance(v, dict) else {"odds": v})} for k, v in value.items()]
-            return [value]
+    for key in ("markets", "marketOdds", "market_odds", "bets", "lines"):
+        markets = _coerce_market_objects(block.get(key))
+        if markets:
+            return markets
 
     odds_value = block.get("odds")
     if isinstance(odds_value, list):
-        if odds_value and isinstance(odds_value[0], dict) and "odds" in odds_value[0]:
-            return odds_value
+        if odds_value and isinstance(odds_value[0], dict) and any(
+            item.get("marketKey") or item.get("name") or item.get("marketName")
+            for item in odds_value
+            if isinstance(item, dict)
+        ):
+            return [item for item in odds_value if isinstance(item, dict)]
         return [{"id": block.get("market", block.get("marketId", "")), "odds": odds_value}]
+    if isinstance(odds_value, dict):
+        markets = _coerce_market_objects(odds_value)
+        if markets:
+            return markets
 
+    if any(key in block for key in ("outcomes", "prices", "homeOdds", "awayOdds")):
+        return [block]
     return []
 
 
+def _coerce_market_objects(value) -> list[dict]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not isinstance(value, dict):
+        return []
+
+    nested = value.get("markets")
+    if isinstance(nested, (dict, list)):
+        return _coerce_market_objects(nested)
+
+    # Single market payload.
+    if any(key in value for key in ("outcomes", "prices", "homeOdds", "awayOdds", "marketKey")):
+        return [value]
+
+    out = []
+    for market_key, item in value.items():
+        if isinstance(item, dict):
+            copied = dict(item)
+            copied.setdefault("marketKey", _safe_str(market_key))
+            out.append(copied)
+        elif isinstance(item, list):
+            out.append({"marketKey": _safe_str(market_key), "odds": item})
+        else:
+            odd = _safe_float(item)
+            if odd > 1.0:
+                out.append({"marketKey": _safe_str(market_key), "odds": {str(market_key): odd}})
+    return out
+
+
+def _coerce_outcome_objects(value) -> list[dict]:
+    if isinstance(value, list):
+        out = []
+        for idx, item in enumerate(value):
+            if isinstance(item, dict):
+                out.append(item)
+                continue
+            odd = _safe_float(item)
+            if odd > 1.0:
+                out.append({"name": str(idx), "odds": odd, "_outcome_key": str(idx)})
+        return out
+
+    if not isinstance(value, dict):
+        return []
+
+    for nested_key in ("outcomes", "prices", "odds", "selections", "participants", "runners", "choices"):
+        if nested_key in value:
+            nested = _coerce_outcome_objects(value.get(nested_key))
+            if nested:
+                return nested
+
+    # Map payload: {"Team A": 1.85, "Team B": 2.05, "Draw": 3.2}
+    if all(not isinstance(v, (dict, list)) for v in value.values()):
+        outcomes = []
+        for name, odd in value.items():
+            price = _safe_float(odd)
+            if price > 1.0:
+                outcomes.append({"name": str(name), "odds": price, "_outcome_key": str(name)})
+        return outcomes
+
+    out = []
+    for outcome_key, item in value.items():
+        if isinstance(item, dict):
+            copied = dict(item)
+            copied.setdefault("_outcome_key", str(outcome_key))
+            out.append(copied)
+        elif isinstance(item, list):
+            for sub_idx, sub_item in enumerate(item):
+                normalized = _normalize_outcome_item(sub_item, f"{outcome_key}:{sub_idx}")
+                if normalized:
+                    out.append(normalized)
+        else:
+            odd = _safe_float(item)
+            if odd > 1.0:
+                out.append({"name": str(outcome_key), "odds": odd, "_outcome_key": str(outcome_key)})
+    return out
+
+
+def _normalize_outcome_item(item, outcome_key: str) -> dict | None:
+    if isinstance(item, dict):
+        copied = dict(item)
+        copied.setdefault("_outcome_key", str(outcome_key))
+        return copied
+    odd = _safe_float(item)
+    if odd > 1.0:
+        return {"name": str(outcome_key), "odds": odd, "_outcome_key": str(outcome_key)}
+    return None
+
+
 def _extract_outcomes(market: dict) -> list[dict]:
-    for key in ("odds", "outcomes", "prices", "selections"):
-        value = market.get(key)
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-        if isinstance(value, dict):
-            # Map payload: {"Team A": 1.85, "Team B": 2.05, "Draw": 3.2}
-            if all(not isinstance(v, dict) for v in value.values()):
-                outcomes = []
-                for name, odd in value.items():
-                    outcomes.append({"name": str(name), "odds": odd, "_outcome_key": str(name)})
-                return outcomes
-            # Nested outcomes map payload: {"10166": {...}, "10167": {...}}
-            if all(isinstance(v, dict) for v in value.values()):
-                out = []
-                for outcome_key, item in value.items():
-                    if not isinstance(item, dict):
-                        continue
-                    copied = dict(item)
-                    copied["_outcome_key"] = str(outcome_key)
-                    out.append(copied)
-                return out
-            return [value]
+    for key in ("odds", "outcomes", "prices", "selections", "participants", "runners", "choices"):
+        out = _coerce_outcome_objects(market.get(key))
+        if out:
+            return out
+
+    for key in ("values", "result", "resultingOdds"):
+        out = _coerce_outcome_objects(market.get(key))
+        if out:
+            return out
+
     # Flat map payload: {"marketKey": "h2h", "Team A": 1.9, "Team B": 2.0}
     outcomes = []
     for key, value in market.items():
@@ -850,8 +1020,15 @@ def _market_has_candidate_h2h_outcomes(market: dict, fixture: dict) -> bool:
     if has_home_token and has_away_token:
         return True
 
-    # Fallback: h2h often arrives as exactly two priced outcomes without explicit labels.
-    return valid == 2 and len(outcomes) == 2
+    home_norm = _normalize_team_name(fixture.get("home_name", ""))
+    away_norm = _normalize_team_name(fixture.get("away_name", ""))
+    if home_norm and away_norm:
+        has_home_name = any(home_norm and (home_norm == token or home_norm in token or token in home_norm) for token in tokens if token)
+        has_away_name = any(away_norm and (away_norm == token or away_norm in token or token in away_norm) for token in tokens if token)
+        if has_home_name and has_away_name:
+            return True
+
+    return False
 
 
 def _extract_bookmaker_name(block: dict) -> str:
@@ -1008,29 +1185,63 @@ def _market_key(market: dict, fallback_block: dict) -> str:
 
 
 def _extract_outcome_price(outcome: dict) -> float:
-    direct = _safe_float(
-        outcome.get(
-            "odds",
-            outcome.get("price", outcome.get("decimalOdds", outcome.get("value", 0))),
-        )
-    )
-    if direct > 1.0:
-        return direct
+    for key in ("odds", "price", "decimalOdds", "value", "decimal", "odd"):
+        direct = _extract_price_from_node(outcome.get(key), depth=0)
+        if direct > 1.0:
+            return direct
 
     players = outcome.get("players")
-    if isinstance(players, dict):
-        for _, player in players.items():
-            if not isinstance(player, dict):
-                continue
-            price = _safe_float(
-                player.get(
-                    "price",
-                    player.get("odds", player.get("decimalOdds", player.get("value", 0))),
-                )
-            )
+    nested_players = _extract_price_from_node(players, depth=0)
+    if nested_players > 1.0:
+        return nested_players
+
+    nested = _extract_price_from_node(outcome, depth=0)
+    if nested > 1.0:
+        return nested
+    return 0.0
+
+
+def _extract_price_from_node(value, depth: int = 0) -> float:
+    if depth > 6 or value is None:
+        return 0.0
+
+    if isinstance(value, (int, float, str)):
+        number = _safe_float(value)
+        return number if number > 1.0 else 0.0
+
+    if isinstance(value, list):
+        for item in value:
+            price = _extract_price_from_node(item, depth + 1)
             if price > 1.0:
                 return price
+        return 0.0
 
+    if not isinstance(value, dict):
+        return 0.0
+
+    price_key_priority = (
+        "price",
+        "odds",
+        "decimalOdds",
+        "decimal",
+        "value",
+        "odd",
+        "american",
+        "line",
+    )
+
+    for key in price_key_priority:
+        if key not in value:
+            continue
+        nested = _extract_price_from_node(value.get(key), depth + 1)
+        if nested > 1.0:
+            return nested
+
+    for nested_value in value.values():
+        if isinstance(nested_value, (dict, list)):
+            nested = _extract_price_from_node(nested_value, depth + 1)
+            if nested > 1.0:
+                return nested
     return 0.0
 
 
@@ -1261,6 +1472,30 @@ def _event_similarity_score(a: str, b: str) -> float:
     return inter / max(len(na), len(nb))
 
 
+def _team_similarity(a: str, b: str) -> float:
+    na = _normalize_team_name(a)
+    nb = _normalize_team_name(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+
+    if (na in nb or nb in na) and min(len(na), len(nb)) >= 4:
+        contains_score = 0.88
+    else:
+        contains_score = 0.0
+
+    ratio_score = SequenceMatcher(None, na, nb).ratio()
+
+    ta = set(_tokenize_event_name(a))
+    tb = set(_tokenize_event_name(b))
+    token_score = 0.0
+    if ta and tb:
+        token_score = len(ta.intersection(tb)) / max(len(ta), len(tb))
+
+    return max(contains_score, ratio_score, token_score)
+
+
 def _tokenize_event_name(value: str) -> list[str]:
     text = _safe_str(value).lower()
     text = unicodedata.normalize("NFKD", text)
@@ -1316,6 +1551,40 @@ def _payload_shape_summary(payload) -> str:
         keys = list(payload.keys())[:10]
         return f"dict keys={keys}"
     return type(payload).__name__
+
+
+def _payload_debug_summary(payload) -> str:
+    shape = _payload_shape_summary(payload)
+    try:
+        blocks = _extract_root_blocks(payload)[:4] if isinstance(payload, (dict, list)) else []
+    except Exception:
+        blocks = []
+
+    bookmakers: list[str] = []
+    markets: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        bookmaker = _extract_bookmaker_name(block)
+        if bookmaker:
+            bookmakers.append(bookmaker)
+        for market in _extract_markets(block)[:4]:
+            if not isinstance(market, dict):
+                continue
+            mk = _market_key(market, block)
+            if mk:
+                markets.append(mk)
+
+    if not bookmakers and isinstance(payload, dict):
+        bookmaker_map = payload.get("bookmakerOdds")
+        if isinstance(bookmaker_map, dict):
+            bookmakers = [_safe_str(k) for k in list(bookmaker_map.keys())[:4]]
+
+    return (
+        f"shape={shape} "
+        f"bookmakers={bookmakers[:4]} "
+        f"markets={markets[:6]}"
+    )
 
 
 def _payload_has_no_odds(payload) -> bool:
