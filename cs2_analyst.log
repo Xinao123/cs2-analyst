@@ -1,0 +1,158 @@
+19:02:06 [INFO] [DB] Inicializado: data/cs2_analyst.db
+19:02:06 [INFO] [LLM] Desabilitada ou indisponivel. Fluxo segue em modo template.
+19:02:06 [INFO] ==================================================
+19:02:06 [INFO]   ðŸŽ® CS2 ANALYST BOT
+19:02:06 [INFO] ==================================================
+19:02:06 [INFO]   Times: 0 | Partidas: 0
+19:02:06 [INFO]   Modelo treinado: âŒ
+19:02:06 [INFO]   Intervalo: 15 min
+19:02:06 [INFO] ==================================================
+19:02:08 [WARNING] [TG] Falha status=404 body={"ok":false,"error_code":404,"description":"Not Found"}
+19:02:08 [INFO] [SCHEDULER] AtualizaÃ§Ã£o diÃ¡ria de dados...
+19:02:08 [INFO] [HLTV] Iniciando atualizacao completa...
+19:02:08 [INFO] [HLTV] Buscando top 30 times...
+19:02:09 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:02:15 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:02:20 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:02:30 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:02:34 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:02:42 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:02:50 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:03:00 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:03:04 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:03:04 [ERROR] Connection failed
+19:03:04 [WARNING] [HLTV] Nenhum time retornado
+19:03:06 [INFO] [HLTV] Buscando resultados (1 pagina(s))...
+19:03:07 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:03:13 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:03:21 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:03:31 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:03:40 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:03:44 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:03:49 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:03:58 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:04:06 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:04:06 [ERROR] Connection failed
+19:04:06 [INFO] [HLTV] Retorno vazio para resultados (days=2, min_rating=0, max=200), tentando modo amplo...
+19:04:06 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:04:12 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:04:15 [INFO] [DB] Inicializado: data/cs2_analyst.db
+19:04:15 [INFO] [LLM] Desabilitada ou indisponivel. Fluxo segue em modo template.
+19:04:15 [INFO] ==================================================
+19:04:15 [INFO]   ðŸŽ® CS2 ANALYST BOT
+19:04:15 [INFO] ==================================================
+19:04:15 [INFO]   Times: 0 | Partidas: 0
+19:04:15 [INFO]   Modelo treinado: âŒ
+19:04:15 [INFO]   Intervalo: 15 min
+19:04:15 [INFO] ==================================================
+19:04:16 [WARNING] [TG] Falha status=404 body={"ok":false,"error_code":404,"description":"Not Found"}
+19:04:16 [INFO] [SCHEDULER] AtualizaÃ§Ã£o diÃ¡ria de dados...
+19:04:16 [INFO] [HLTV] Iniciando atualizacao completa...
+19:04:16 [INFO] [HLTV] Buscando top 30 times...
+19:04:17 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:04:19 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:04:24 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:04:28 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:04:31 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:04:36 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:04:40 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:04:41 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:04:45 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:04:49 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:04:51 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:04:55 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:05:00 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:05:00 [ERROR] Connection failed
+19:05:00 [WARNING] [HLTV] API retornou None para resultados
+19:05:02 [INFO] [UPCOMING] Buscando partidas futuras (ordem=pandascore -> hltv)...
+19:05:02 [WARNING] [UPCOMING][pandascore] Token ausente em PANDASCORE_API_TOKEN, modo degradado para fallback.
+19:05:02 [INFO] [UPCOMING][pandascore] retornadas=0 salvas=0 descartadas=0 (sem_time=0, sem_data=0, fora_janela=0, duplicada=0, team_unresolved=0, cloudflare=0, payload_invalido=0)
+19:05:02 [WARNING] [UPCOMING][pandascore] erro=token_ausente:PANDASCORE_API_TOKEN
+19:05:02 [INFO] [UPCOMING] Provider pandascore sem partidas salvas, tentando fallback...
+19:05:02 [INFO] [HLTV] Buscando partidas futuras...
+19:05:02 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:05:05 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:05:09 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:05:11 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:05:19 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:05:20 [INFO] Fetching https://www.hltv.org/ranking/teams/2026/march/09, code: 403
+19:05:20 [ERROR] Connection failed
+19:05:20 [WARNING] [HLTV] Nenhum time retornado
+19:05:22 [INFO] [HLTV] Buscando resultados (1 pagina(s))...
+19:05:23 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:05:24 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:05:29 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:05:31 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:05:35 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:05:40 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:05:44 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:05:47 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:05:50 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:05:56 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:05:56 [ERROR] Connection failed
+19:05:56 [INFO] [HLTV] Retorno vazio para upcoming (days=4, min_rating=0), tentando modo amplo...
+19:05:56 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:05:56 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:06:00 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:06:05 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:06:06 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:06:13 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:06:15 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:06:21 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:06:22 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:06:27 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:06:29 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:06:29 [ERROR] Connection failed
+19:06:29 [INFO] [HLTV] Retorno vazio para resultados (days=2, min_rating=0, max=200), tentando modo amplo...
+19:06:29 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:06:36 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:06:36 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:06:44 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:06:46 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:06:51 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:06:52 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:06:52 [ERROR] Connection failed
+19:06:52 [INFO] [HLTV] Upcoming ainda vazio, tentando fallback por eventos...
+19:06:52 [INFO] Fetching https://www.hltv.org/events, code: 403
+19:06:57 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:06:59 [INFO] Fetching https://www.hltv.org/events, code: 403
+19:07:07 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:07:08 [INFO] Fetching https://www.hltv.org/events, code: 403
+19:07:14 [INFO] Fetching https://www.hltv.org/events, code: 403
+19:07:16 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:07:20 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:07:22 [INFO] Fetching https://www.hltv.org/events, code: 403
+19:07:27 [INFO] Fetching https://www.hltv.org/events, code: 403
+19:07:30 [INFO] Fetching https://www.hltv.org/results, code: 403
+19:07:30 [ERROR] Connection failed
+19:07:30 [WARNING] [HLTV] API retornou None para resultados
+19:07:32 [INFO] [UPCOMING] Buscando partidas futuras (ordem=pandascore -> hltv)...
+19:07:32 [WARNING] [UPCOMING][pandascore] Token ausente em PANDASCORE_API_TOKEN, modo degradado para fallback.
+19:07:32 [INFO] [UPCOMING][pandascore] retornadas=0 salvas=0 descartadas=0 (sem_time=0, sem_data=0, fora_janela=0, duplicada=0, team_unresolved=0, cloudflare=0, payload_invalido=0)
+19:07:32 [WARNING] [UPCOMING][pandascore] erro=token_ausente:PANDASCORE_API_TOKEN
+19:07:32 [INFO] [UPCOMING] Provider pandascore sem partidas salvas, tentando fallback...
+19:07:32 [INFO] [HLTV] Buscando partidas futuras...
+19:07:32 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:07:35 [INFO] Fetching https://www.hltv.org/events, code: 403
+19:07:42 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:07:43 [INFO] Fetching https://www.hltv.org/events, code: 403
+19:07:51 [INFO] Fetching https://www.hltv.org/events, code: 403
+19:07:51 [ERROR] Connection failed
+19:07:52 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:07:52 [WARNING] [HLTV] Possivel bloqueio Cloudflare em /matches (status=403, challenge=True). Configure proxy_path e/ou scraper.cookie (cf_clearance).
+19:07:52 [INFO] [UPCOMING][hltv] retornadas=0 salvas=0 descartadas=0 (sem_time=0, sem_data=0, fora_janela=0, duplicada=0, team_unresolved=0, cloudflare=1, payload_invalido=0)
+19:07:52 [WARNING] [UPCOMING][hltv] erro=cloudflare:403
+19:07:52 [WARNING] [UPCOMING] Nenhuma partida futura salva. Ultimo erro=cloudflare:403
+19:07:52 [INFO] [HLTV] Atualizacao completa: 0 times, 0 jogadores, 0 partidas, 0 futuras
+19:07:52 [INFO] [UPCOMING] Buscando partidas futuras (ordem=pandascore -> hltv)...
+19:07:52 [WARNING] [UPCOMING][pandascore] Token ausente em PANDASCORE_API_TOKEN, modo degradado para fallback.
+19:07:52 [INFO] [UPCOMING][pandascore] retornadas=0 salvas=0 descartadas=0 (sem_time=0, sem_data=0, fora_janela=0, duplicada=0, team_unresolved=0, cloudflare=0, payload_invalido=0)
+19:07:52 [WARNING] [UPCOMING][pandascore] erro=token_ausente:PANDASCORE_API_TOKEN
+19:07:52 [INFO] [UPCOMING] Provider pandascore sem partidas salvas, tentando fallback...
+19:07:52 [INFO] [HLTV] Buscando partidas futuras...
+19:07:52 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:08:01 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:08:02 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:08:08 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:08:09 [INFO] Fetching https://www.hltv.org/matches, code: 403
+19:08:17 [INFO] Fetching https://www.hltv.org/matches, code: 403
