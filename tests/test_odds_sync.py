@@ -281,6 +281,60 @@ class OddsSyncTests(unittest.TestCase):
         }
         self.assertFalse(_payload_has_any_price(payload))
 
+    def test_sync_classifies_price_without_h2h_as_sem_odds_h2h(self):
+        os.environ[self.token_env] = "test-token"
+        fixtures = [
+            {
+                "fixture_id": "fx-h2h-miss",
+                "home_name": "FURIA",
+                "away_name": "TYLOO",
+                "event_name": "ESL Pro League",
+                "start_dt": datetime.now(timezone.utc) + timedelta(hours=2),
+            }
+        ]
+        odds_payload = {
+            "bookmakerOdds": {
+                "pinnacle": {
+                    "markets": {
+                        "totals": {
+                            "name": "Total rounds over/under",
+                            "outcomes": {
+                                "over": {"name": "Over 26.5", "price": 1.88},
+                                "under": {"name": "Under 26.5", "price": 1.92},
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        with patch.object(self.sync, "_resolve_sport_id", return_value="17"), patch.object(
+            self.sync, "_fetch_fixtures", return_value=(fixtures, "")
+        ), patch.object(self.sync, "_fetch_fixture_odds", return_value=(odds_payload, "")):
+            report = self.sync.sync_upcoming_odds()
+
+        self.assertEqual(0, report["saved"])
+        self.assertEqual(1, report["reasons"]["sem_odds_h2h"])
+        self.assertEqual(0, report["reasons"]["payload_invalido"])
+
+    def test_sync_keeps_payload_invalido_for_broken_fixture_payload(self):
+        os.environ[self.token_env] = "test-token"
+        fixtures = [
+            {
+                "fixture_id": "fx-broken",
+                "home_name": "FURIA",
+                "away_name": "TYLOO",
+                "event_name": "ESL Pro League",
+                # start_dt ausente -> fixture invalida
+            }
+        ]
+        with patch.object(self.sync, "_resolve_sport_id", return_value="17"), patch.object(
+            self.sync, "_fetch_fixtures", return_value=(fixtures, "")
+        ):
+            report = self.sync.sync_upcoming_odds()
+
+        self.assertEqual(0, report["saved"])
+        self.assertEqual(1, report["reasons"]["payload_invalido"])
+
     def test_sync_persists_latest_and_snapshots_idempotently(self):
         os.environ[self.token_env] = "test-token"
         fixture_time = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()

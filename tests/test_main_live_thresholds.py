@@ -1,6 +1,11 @@
 import unittest
 
-from main import _is_synthetic_match, _resolve_live_thresholds, _should_sync_odds
+from main import (
+    _is_synthetic_match,
+    _resolve_live_thresholds,
+    _should_allow_low_data_override,
+    _should_sync_odds,
+)
 
 
 class _PredictorStub:
@@ -54,6 +59,43 @@ class MainLiveThresholdTests(unittest.TestCase):
     def test_should_sync_odds_respects_refresh_window(self):
         self.assertFalse(_should_sync_odds(now_ts=1000.0, last_sync_at=100.0, refresh_seconds=1800))
         self.assertTrue(_should_sync_odds(now_ts=1900.0, last_sync_at=100.0, refresh_seconds=1800))
+
+    def test_low_data_override_allows_only_when_strict_conditions_match(self):
+        self.assertTrue(
+            _should_allow_low_data_override(
+                has_valid_odds=True,
+                team1_id=10,
+                team2_id=20,
+                confidence=72.0,
+                value_pct=7.0,
+                synthetic_min_confidence=70.0,
+                synthetic_min_value=6.0,
+            )
+        )
+
+    def test_low_data_override_rejects_missing_conditions(self):
+        self.assertFalse(
+            _should_allow_low_data_override(
+                has_valid_odds=True,
+                team1_id=10,
+                team2_id=20,
+                confidence=68.0,
+                value_pct=7.0,
+                synthetic_min_confidence=70.0,
+                synthetic_min_value=6.0,
+            )
+        )
+        self.assertFalse(
+            _should_allow_low_data_override(
+                has_valid_odds=True,
+                team1_id=0,
+                team2_id=20,
+                confidence=75.0,
+                value_pct=8.0,
+                synthetic_min_confidence=70.0,
+                synthetic_min_value=6.0,
+            )
+        )
 
 
 if __name__ == "__main__":

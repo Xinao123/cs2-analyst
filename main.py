@@ -158,12 +158,21 @@ async def analyze_upcoming(
         max_pick_odds_age_minutes,
         with_odds_before_filters,
     )
+    logger.info(
+        "[ANALYSIS] Thresholds confianca: config=%.1f tuned=%.1f effective=%.1f (auto_tune=%s)",
+        float(live_thresholds.get("min_conf_config", min_confidence_filter)),
+        float(live_thresholds.get("min_conf_tuned", min_confidence_filter)),
+        float(live_thresholds.get("min_conf_effective", min_confidence_filter)),
+        bool(model_cfg.get("confidence_auto_tune", True)),
+    )
 
     for match in upcoming:
         has_valid_odds = (
             _safe_float(match.get("odds_team1")) > 1.0
             and _safe_float(match.get("odds_team2")) > 1.0
         )
+        team1_id = int(match.get("team1_id", 0) or 0)
+        team2_id = int(match.get("team2_id", 0) or 0)
         is_synthetic_match = _is_synthetic_match(match)
         match_confidence_filter = synthetic_min_confidence_filter if is_synthetic_match else min_confidence_filter
         match_value_filter = synthetic_min_value_filter if is_synthetic_match else min_value_filter
@@ -175,15 +184,16 @@ async def analyze_upcoming(
                 odds_filtered_started += 1
             continue
 
-        if not _has_min_recent_data(
+        recent_t1, recent_t2, has_min_recent_data = _get_recent_counts(
             db,
             match,
             min_recent_matches=min_recent_matches,
             form_window_days=form_window_days,
-        ):
+        )
+        needs_low_data_override = not has_min_recent_data
+
+        if not has_min_recent_data and not has_valid_odds:
             filtered_low_data += 1
-            if has_valid_odds:
-                odds_filtered_low_data += 1
             continue
 
         features = features_ext.extract(match)
@@ -222,10 +232,48 @@ async def analyze_upcoming(
             with_odds_analyzed += 1
 
         best_vb = _best_value_bet(analysis)
+        value_pct = float(best_vb.get("value_pct", 0.0)) if best_vb else 0.0
+        confidence = float(prediction.get("confidence", 0.0))
+        low_data_override = False
+        if needs_low_data_override:
+            low_data_override = _should_allow_low_data_override(
+                has_valid_odds=has_valid_odds,
+                team1_id=team1_id,
+                team2_id=team2_id,
+                confidence=confidence,
+                value_pct=value_pct,
+                synthetic_min_confidence=synthetic_min_confidence_filter,
+                synthetic_min_value=synthetic_min_value_filter,
+            )
+            if not low_data_override:
+                filtered_low_data += 1
+                if has_valid_odds:
+                    odds_filtered_low_data += 1
+                    logger.info(
+                        "[ANALYSIS][LOW_DATA] rejeitado match_id=%s teams=%s/%s recent_t1=%s recent_t2=%s req=%s form_window_days=%s",
+                        match.get("id"),
+                        team1_id,
+                        team2_id,
+                        recent_t1,
+                        recent_t2,
+                        min_recent_matches,
+                        form_window_days,
+                    )
+                continue
+            logger.info(
+                "[ANALYSIS][LOW_DATA] override aplicado match_id=%s teams=%s/%s recent_t1=%s recent_t2=%s conf=%.1f value=%.1f",
+                match.get("id"),
+                team1_id,
+                team2_id,
+                recent_t1,
+                recent_t2,
+                confidence,
+                value_pct,
+            )
+
         pick_meta = _build_pick_meta(match, prediction, best_vb)
         suggested_bet = pick_meta["official_pick_name"] if best_vb else ""
         suggested_stake = float(best_vb.get("suggested_stake", 0.0)) if best_vb else 0.0
-        value_pct = float(best_vb.get("value_pct", 0.0)) if best_vb else 0.0
 
         db.save_prediction(
             match_id=match["id"],
@@ -242,7 +290,6 @@ async def analyze_upcoming(
             odds_team2=match.get("odds_team2"),
         )
 
-        confidence = float(prediction.get("confidence", 0.0))
         if confidence < match_confidence_filter:
             filtered_low_confidence += 1
             if has_valid_odds:
@@ -285,6 +332,7 @@ async def analyze_upcoming(
             "model_winner_name": pick_meta["model_winner_name"],
             "pick_source": pick_meta["pick_source"],
             "model_vs_official_diverged": pick_meta["model_vs_official_diverged"],
+            "low_data_override": low_data_override,
         }
         approved_candidates.append(candidate)
         value_count += 1
@@ -494,11 +542,14 @@ def _resolve_live_thresholds(model_cfg: dict, predictor: Predictor | None = None
     - Com `confidence_auto_tune=true`, aplica `max(min_confidence_config, min_confidence_tunado)`.
     - Partidas com time sintetico usam piso mais rigoroso.
     """
-    base_conf = max(0.0, float(model_cfg.get("min_confidence", 62.0)))
+    config_conf = max(0.0, float(model_cfg.get("min_confidence", 62.0)))
+    tuned_conf = config_conf
+    base_conf = config_conf
     if bool(model_cfg.get("confidence_auto_tune", True)) and predictor is not None:
-        tuned_conf = float(getattr(predictor, "min_confidence", 0.0))
-        if tuned_conf > 0:
-            base_conf = max(base_conf, tuned_conf)
+        tuned_conf_candidate = float(getattr(predictor, "min_confidence", 0.0))
+        if tuned_conf_candidate > 0:
+            tuned_conf = tuned_conf_candidate
+            base_conf = max(base_conf, tuned_conf_candidate)
 
     base_value = max(0.0, float(model_cfg.get("min_value_pct", 6.0)))
     synthetic_conf = max(
@@ -514,6 +565,9 @@ def _resolve_live_thresholds(model_cfg: dict, predictor: Predictor | None = None
         "min_value": base_value,
         "synthetic_min_confidence": synthetic_conf,
         "synthetic_min_value": synthetic_value,
+        "min_conf_config": config_conf,
+        "min_conf_tuned": tuned_conf,
+        "min_conf_effective": base_conf,
     }
 
 
@@ -604,24 +658,57 @@ def _is_odds_fresh(odds_updated_at, max_age_minutes: int, now_dt: datetime | Non
     return age_min <= max_age_minutes
 
 
+def _get_recent_counts(
+    db: Database,
+    match: dict,
+    min_recent_matches: int,
+    form_window_days: int,
+) -> tuple[int, int, bool]:
+    if min_recent_matches <= 0:
+        return min_recent_matches, min_recent_matches, True
+
+    team1_id = int(match.get("team1_id", 0) or 0)
+    team2_id = int(match.get("team2_id", 0) or 0)
+    if team1_id == 0 or team2_id == 0:
+        return 0, 0, False
+
+    limit = max(min_recent_matches, 5)
+    t1_recent = db.get_team_recent_matches(team1_id, limit=limit, days=form_window_days)
+    t2_recent = db.get_team_recent_matches(team2_id, limit=limit, days=form_window_days)
+    count_t1 = len(t1_recent)
+    count_t2 = len(t2_recent)
+    return count_t1, count_t2, count_t1 >= min_recent_matches and count_t2 >= min_recent_matches
+
+
 def _has_min_recent_data(
     db: Database,
     match: dict,
     min_recent_matches: int,
     form_window_days: int,
 ) -> bool:
-    if min_recent_matches <= 0:
-        return True
+    _, _, has_data = _get_recent_counts(db, match, min_recent_matches, form_window_days)
+    return has_data
 
-    team1_id = int(match.get("team1_id", 0) or 0)
-    team2_id = int(match.get("team2_id", 0) or 0)
-    if team1_id == 0 or team2_id == 0:
+
+def _should_allow_low_data_override(
+    *,
+    has_valid_odds: bool,
+    team1_id: int,
+    team2_id: int,
+    confidence: float,
+    value_pct: float,
+    synthetic_min_confidence: float,
+    synthetic_min_value: float,
+) -> bool:
+    if not has_valid_odds:
         return False
-
-    limit = max(min_recent_matches, 5)
-    t1_recent = db.get_team_recent_matches(team1_id, limit=limit, days=form_window_days)
-    t2_recent = db.get_team_recent_matches(team2_id, limit=limit, days=form_window_days)
-    return len(t1_recent) >= min_recent_matches and len(t2_recent) >= min_recent_matches
+    if team1_id <= 0 or team2_id <= 0:
+        return False
+    if confidence < synthetic_min_confidence:
+        return False
+    if value_pct < synthetic_min_value:
+        return False
+    return True
 
 
 def _build_training_quality_weights(config: dict, sample_quality: list[dict]) -> list[float]:

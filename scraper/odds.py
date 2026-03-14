@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 ODDS_SKIP_REASON_KEYS = (
     "sem_match_local",
     "sem_odds",
+    "sem_odds_h2h",
     "fora_janela",
     "bookmaker_filtrado",
     "payload_invalido",
@@ -179,10 +180,10 @@ class OddsPapiSync:
             quotes = _extract_bookmaker_quotes(odds_payload, fixture)
             if not quotes:
                 if _payload_has_any_price(odds_payload):
-                    report["reasons"]["payload_invalido"] += 1
+                    report["reasons"]["sem_odds_h2h"] += 1
                     if payload_invalid_logged < 3:
                         logger.debug(
-                            "[ODDS][oddspapi] payload sem quotes fixture=%s %s",
+                            "[ODDS][oddspapi] payload sem linha h2h fixture=%s %s",
                             fixture_id,
                             _payload_debug_summary(odds_payload),
                         )
@@ -262,7 +263,7 @@ class OddsPapiSync:
         reasons = report.get("reasons", {})
         logger.info(
             "[ODDS][oddspapi] retornadas=%s casadas=%s salvas=%s snapshots=%s descartadas=%s "
-            "(sem_match_local=%s, sem_odds=%s, fora_janela=%s, bookmaker_filtrado=%s, payload_invalido=%s, api_error=%s)",
+            "(sem_match_local=%s, sem_odds=%s, sem_odds_h2h=%s, fora_janela=%s, bookmaker_filtrado=%s, payload_invalido=%s, api_error=%s)",
             _safe_int(report.get("returned")),
             _safe_int(report.get("matched")),
             _safe_int(report.get("saved")),
@@ -270,6 +271,7 @@ class OddsPapiSync:
             _safe_int(report.get("skipped")),
             _safe_int(reasons.get("sem_match_local")),
             _safe_int(reasons.get("sem_odds")),
+            _safe_int(reasons.get("sem_odds_h2h")),
             _safe_int(reasons.get("fora_janela")),
             _safe_int(reasons.get("bookmaker_filtrado")),
             _safe_int(reasons.get("payload_invalido")),
