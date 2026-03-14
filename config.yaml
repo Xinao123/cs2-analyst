@@ -51,7 +51,7 @@ odds:
   provider: "oddspapi"
   base_url: "https://api.oddspapi.io/v4"
   token_env: "ODDSPAPI_API_KEY"
-  sport_id: ""
+  sport_id: "17"
   market: "h2h"
   days_ahead: 4
   refresh_minutes: 30
