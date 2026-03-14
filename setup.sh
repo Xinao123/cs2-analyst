@@ -16,6 +16,13 @@ else
     echo "📝 data/config.yaml já existe"
 fi
 
+if [ ! -f .env ] && [ -f .env.example ]; then
+    cp .env.example .env
+    echo "✅ .env criado a partir de .env.example"
+else
+    echo "📝 .env já existe (ou .env.example ausente)"
+fi
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " PASSO A PASSO"
@@ -25,16 +32,23 @@ echo "  1. Edite data/config.yaml:"
 echo "     - Telegram: bot_token e chat_id"
 echo "     - Ajuste min_value_pct e min_confidence"
 echo ""
-echo "  2. Instale dependências:"
+echo "  2. Edite .env (persistente no servidor):"
+echo "     - PANDASCORE_API_TOKEN"
+echo "     - ODDSPAPI_API_KEY"
+echo "     - DEEPSEEK_API_KEY"
+echo "     - TELEGRAM_BOT_TOKEN"
+echo "     - TELEGRAM_CHAT_ID"
+echo ""
+echo "  3. Instale dependências:"
 echo "     pip install -r requirements.txt"
 echo ""
-echo "  3. Colete dados históricos (roda ~5-10 min):"
+echo "  4. Colete dados históricos (roda ~5-10 min):"
 echo "     python -m scripts.backfill"
 echo ""
-echo "  4. Treine o modelo:"
+echo "  5. Treine o modelo:"
 echo "     python -m scripts.backtest"
 echo ""
-echo "  5. Rode o bot:"
+echo "  6. Rode o bot:"
 echo "     python main.py --once     # testa uma vez"
 echo "     python main.py            # roda contínuo"
 echo ""

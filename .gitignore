@@ -1,3 +1,6 @@
 *.pyd
 *.pyc
 *.whl
+.env
+.env.*
+!.env.example
