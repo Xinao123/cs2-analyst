@@ -315,6 +315,12 @@ async def analyze_upcoming(
                 odds_filtered_stale += 1
             continue
 
+        if pick_meta["model_vs_official_diverged"]:
+            filtered_low_value += 1
+            if has_valid_odds:
+                odds_filtered_low_value += 1
+            continue
+
         score = _score_bet_candidate(prediction, best_vb, match=match)
         best_odd = float(best_vb.get("odds", 0.0))
         candidate = {

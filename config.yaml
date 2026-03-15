@@ -66,7 +66,7 @@ odds:
   retry_count: 3
   retry_backoff_sec: 2
   max_pick_odds_age_minutes: 120
-  bookmaker_whitelist: []
+  bookmaker_whitelist: ["bet365", "betano", "pinnacle", "1xbet", "betway", "unibet", "bwin", "ggbet"]
 
 # Modelo
 model:
