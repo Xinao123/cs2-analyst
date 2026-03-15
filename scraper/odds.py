@@ -432,9 +432,6 @@ class OddsPapiSync:
             "oddsFormat": "decimal",
             "verbosity": self.odds_verbosity,
         }
-        if self.bookmaker_whitelist:
-            base_params["bookmakers"] = ",".join(sorted(self.bookmaker_whitelist))
-
         routes = [
             ("/odds", base_params),
             ("/odds", dict(base_params, fixtureId=fixture_id)),
@@ -633,8 +630,6 @@ class OddsPapiSync:
             "to": until.isoformat(),
             "hasOdds": "true",
         }
-        if self.bookmaker_whitelist:
-            base_params["bookmakers"] = ",".join(sorted(self.bookmaker_whitelist))
         routes = (
             "/odds-by-tournaments",
             "/odds/by-tournaments",
