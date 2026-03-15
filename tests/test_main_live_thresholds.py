@@ -78,12 +78,13 @@ class MainLiveThresholdTests(unittest.TestCase):
         )
 
     def test_low_data_override_rejects_missing_conditions(self):
+        # Confidence abaixo do threshold relaxado (max(50, 70*0.80)=56)
         self.assertFalse(
             _should_allow_low_data_override(
                 has_valid_odds=True,
                 team1_id=10,
                 team2_id=20,
-                confidence=68.0,
+                confidence=45.0,
                 value_pct=7.0,
                 synthetic_min_confidence=70.0,
                 synthetic_min_value=6.0,

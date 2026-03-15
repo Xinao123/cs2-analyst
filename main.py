@@ -706,9 +706,10 @@ def _should_allow_low_data_override(
         return False
     if team1_id <= 0 or team2_id <= 0:
         return False
-    if confidence < synthetic_min_confidence:
-        return False
-    if value_pct < synthetic_min_value:
+    # Threshold relaxado: aceitar com 80% do synthetic threshold (min 50%)
+    # O pipeline principal ja filtra por confidence e value depois
+    relaxed_conf = max(50.0, synthetic_min_confidence * 0.80)
+    if confidence < relaxed_conf:
         return False
     return True
 
