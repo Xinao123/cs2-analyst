@@ -538,18 +538,20 @@ def _resolve_live_thresholds(model_cfg: dict, predictor: Predictor | None = None
     Resolve thresholds efetivos de confianca/value para inferencia ao vivo.
 
     Regras:
-    - Usa valores do config como base.
-    - Com `confidence_auto_tune=true`, aplica `max(min_confidence_config, min_confidence_tunado)`.
+    - Usa valores do config como base e teto maximo.
+    - Com `confidence_auto_tune=true`, usa o tunado apenas se for menor que o config.
     - Partidas com time sintetico usam piso mais rigoroso.
     """
     config_conf = max(0.0, float(model_cfg.get("min_confidence", 62.0)))
     tuned_conf = config_conf
     base_conf = config_conf
     if bool(model_cfg.get("confidence_auto_tune", True)) and predictor is not None:
-        tuned_conf_candidate = float(getattr(predictor, "min_confidence", 0.0))
+        tuned_conf_candidate = float(getattr(predictor, "_saved_tuned_confidence", 0.0))
+        if tuned_conf_candidate <= 0:
+            tuned_conf_candidate = float(getattr(predictor, "min_confidence", 0.0))
         if tuned_conf_candidate > 0:
             tuned_conf = tuned_conf_candidate
-            base_conf = max(base_conf, tuned_conf_candidate)
+            base_conf = min(config_conf, tuned_conf_candidate)
 
     base_value = max(0.0, float(model_cfg.get("min_value_pct", 6.0)))
     synthetic_conf = max(

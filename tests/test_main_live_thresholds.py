@@ -11,10 +11,12 @@ from main import (
 class _PredictorStub:
     def __init__(self, min_confidence: float):
         self.min_confidence = min_confidence
+        self._saved_tuned_confidence = min_confidence
 
 
 class MainLiveThresholdTests(unittest.TestCase):
-    def test_confidence_auto_tune_uses_max_between_config_and_tuned(self):
+    def test_confidence_auto_tune_config_caps_tuned(self):
+        """Config funciona como teto: tuned=75 > config=62 → effective=62."""
         cfg = {
             "min_confidence": 62.0,
             "min_value_pct": 6.0,
@@ -23,27 +25,29 @@ class MainLiveThresholdTests(unittest.TestCase):
             "synthetic_live_min_value_pct": 7.0,
         }
         thresholds = _resolve_live_thresholds(cfg, _PredictorStub(75.0))
-        self.assertEqual(75.0, thresholds["min_confidence"])
+        self.assertEqual(62.0, thresholds["min_confidence"])
         self.assertEqual(6.0, thresholds["min_value"])
-        self.assertEqual(75.0, thresholds["synthetic_min_confidence"])
+        self.assertEqual(68.0, thresholds["synthetic_min_confidence"])
         self.assertEqual(7.0, thresholds["synthetic_min_value"])
 
-    def test_confidence_auto_tune_keeps_config_when_tuned_lower(self):
+    def test_confidence_auto_tune_uses_tuned_when_lower(self):
+        """Tuned=60 < config=62 → effective=60 (tuned e mais permissivo)."""
         cfg = {
             "min_confidence": 62.0,
             "min_value_pct": 6.0,
             "confidence_auto_tune": True,
         }
         thresholds = _resolve_live_thresholds(cfg, _PredictorStub(60.0))
-        self.assertEqual(62.0, thresholds["min_confidence"])
+        self.assertEqual(60.0, thresholds["min_confidence"])
 
-    def test_auto_tune_used_when_min_confidence_not_explicit(self):
+    def test_auto_tune_capped_when_min_confidence_not_explicit(self):
+        """Sem config explicito (default=62), tuned=65 → effective=62 (config cap)."""
         cfg = {
             "confidence_auto_tune": True,
             "min_value_pct": 6.0,
         }
         thresholds = _resolve_live_thresholds(cfg, _PredictorStub(65.0))
-        self.assertEqual(65.0, thresholds["min_confidence"])
+        self.assertEqual(62.0, thresholds["min_confidence"])
         self.assertEqual(6.0, thresholds["min_value"])
         self.assertGreaterEqual(thresholds["synthetic_min_confidence"], thresholds["min_confidence"])
         self.assertGreaterEqual(thresholds["synthetic_min_value"], thresholds["min_value"])

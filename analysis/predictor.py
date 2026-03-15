@@ -671,7 +671,7 @@ class Predictor:
             self.tuning_summary = data.get("tuning_summary", {}) or {}
             self._feature_names = data["feature_names"]
             self._is_calibrated = bool(data.get("is_calibrated", False))
-            self.min_confidence = float(data.get("recommended_min_confidence", self.min_confidence))
+            self._saved_tuned_confidence = float(data.get("recommended_min_confidence", self.min_confidence))
             self._is_trained = True
             logger.info("[MODEL] Carregado de %s", self.model_path)
         except Exception as e:
