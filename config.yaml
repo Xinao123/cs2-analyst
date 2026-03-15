@@ -24,8 +24,8 @@ scraper:
   # Estrategia de provider para partidas futuras
   upcoming_provider: "pandascore"
   upcoming_fallback: "hltv"
-  upcoming_days: 4
-  upcoming_days_ahead: 4
+  upcoming_days: 7
+  upcoming_days_ahead: 7
   upcoming_max_pages: 5
   upcoming_retry_count: 3
   upcoming_retry_backoff_sec: 2
@@ -53,9 +53,13 @@ odds:
   token_env: "ODDSPAPI_API_KEY"
   sport_id: "17"
   market: "h2h"
-  days_ahead: 4
+  days_ahead: 7
   refresh_minutes: 30
   match_window_hours: 8
+  max_requests_per_cycle: 80
+  tournament_primary_lookahead_hours: 72
+  tournament_primary_max_per_cycle: 8
+  fixture_fallback_max_per_cycle: 24
   # false = sincroniza odds apenas no inicio de cada ciclo principal
   sync_during_wait: false
   timeout_sec: 15

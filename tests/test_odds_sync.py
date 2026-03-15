@@ -9,6 +9,7 @@ from analysis.value import ValueDetector
 from db.models import Database
 from scraper.odds import (
     OddsPapiSync,
+    _collect_priority_tournament_ids,
     _extract_bookmaker_quotes,
     _index_local_matches,
     _normalize_fixture_payload,
@@ -36,6 +37,7 @@ class OddsSyncTests(unittest.TestCase):
                 "match_window_hours": 6,
                 "retry_count": 0,
                 "bookmaker_whitelist": ["bet365", "betano", "pinnacle", "1xbet"],
+                "tournament_primary_max_per_cycle": 0,
             },
         }
         self.sync = OddsPapiSync(self.db, self.config)
@@ -280,6 +282,55 @@ class OddsSyncTests(unittest.TestCase):
             },
         }
         self.assertFalse(_payload_has_any_price(payload))
+
+    def test_collect_priority_tournament_ids_prioritizes_near_matches(self):
+        now = datetime.now(timezone.utc)
+        fixtures = [
+            {"fixture_id": "a", "tournament_id": "T2", "start_dt": now + timedelta(hours=90)},
+            {"fixture_id": "b", "tournament_id": "T1", "start_dt": now + timedelta(hours=8)},
+            {"fixture_id": "c", "tournament_id": "T3", "start_dt": now + timedelta(hours=20)},
+            {"fixture_id": "d", "tournament_id": "T1", "start_dt": now + timedelta(hours=12)},
+        ]
+        ordered = _collect_priority_tournament_ids(fixtures, lookahead_hours=72, limit=2)
+        self.assertEqual(["T1", "T3"], ordered)
+
+    def test_sync_uses_tournament_primary_before_fixture_fallback(self):
+        os.environ[self.token_env] = "test-token"
+        self.sync.tournament_primary_max_per_cycle = 2
+        self.sync.fixture_fallback_max_per_cycle = 5
+
+        fixture = {
+            "fixture_id": "fx-tourn-1",
+            "home_name": "FURIA",
+            "away_name": "TYLOO",
+            "event_name": "ESL Pro League",
+            "tournament_id": "555",
+            "start_dt": datetime.now(timezone.utc) + timedelta(hours=2),
+        }
+        tournament_payload = {
+            "data": [
+                {
+                    "fixtureId": "fx-tourn-1",
+                    "participant1Name": "FURIA",
+                    "participant2Name": "TYLOO",
+                    "startTime": fixture["start_dt"].isoformat(),
+                    "bookmakerOdds": {
+                        "pinnacle": {"markets": {"h2h": {"FURIA": 1.87, "TYLOO": 2.04}}}
+                    },
+                }
+            ]
+        }
+
+        with patch.object(self.sync, "_resolve_sport_id", return_value="17"), patch.object(
+            self.sync, "_fetch_fixtures", return_value=([fixture], "")
+        ), patch.object(
+            self.sync, "_fetch_tournament_odds", return_value=(tournament_payload, "")
+        ), patch.object(self.sync, "_fetch_fixture_odds") as fetch_fixture_odds:
+            report = self.sync.sync_upcoming_odds()
+
+        fetch_fixture_odds.assert_not_called()
+        self.assertEqual(1, report["saved"])
+        self.assertEqual(1, report["tournament_primary_used"])
 
     def test_sync_classifies_price_without_h2h_as_sem_odds_h2h(self):
         os.environ[self.token_env] = "test-token"

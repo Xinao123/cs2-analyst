@@ -63,6 +63,19 @@ class OddsPapiSync:
         self.retry_backoff_sec = max(1, _safe_int(odds_cfg.get("retry_backoff_sec", 2)))
         self.max_pages = max(1, _safe_int(odds_cfg.get("max_pages", 5)))
         self.per_page = max(20, _safe_int(odds_cfg.get("per_page", 100)))
+        self.max_requests_per_cycle = max(0, _safe_int(odds_cfg.get("max_requests_per_cycle", 80)))
+        self.tournament_primary_lookahead_hours = max(
+            1,
+            _safe_int(odds_cfg.get("tournament_primary_lookahead_hours", 72)),
+        )
+        self.tournament_primary_max_per_cycle = max(
+            0,
+            _safe_int(odds_cfg.get("tournament_primary_max_per_cycle", 8)),
+        )
+        self.fixture_fallback_max_per_cycle = max(
+            0,
+            _safe_int(odds_cfg.get("fixture_fallback_max_per_cycle", 24)),
+        )
         self.days_ahead = max(
             1,
             _safe_int(
@@ -95,6 +108,9 @@ class OddsPapiSync:
         self._resolved_sport_id = self.sport_id
         self._resolved_sport_name = ""
         self._api_base_url = self.base_url
+        self._cycle_requests_used = 0
+        self._cycle_quota_hit = False
+        self._payload_non_h2h_debug_logged = 0
 
     @property
     def refresh_seconds(self) -> int:
@@ -102,6 +118,9 @@ class OddsPapiSync:
 
     def sync_upcoming_odds(self) -> dict:
         report = self._new_report()
+        self._cycle_requests_used = 0
+        self._cycle_quota_hit = False
+        self._payload_non_h2h_debug_logged = 0
 
         if not self.enabled:
             report["error"] = "disabled"
@@ -142,109 +161,77 @@ class OddsPapiSync:
 
         report["returned"] = len(fixtures)
         if not fixtures:
+            report["requests_used"] = self._cycle_requests_used
             self._log_report(report)
             return report
 
         indexed_matches = _index_local_matches(local_matches)
         used_match_ids: set[int] = set()
-        payload_invalid_logged = 0
+        fixtures_by_id = {f.get("fixture_id"): f for f in fixtures if _safe_str(f.get("fixture_id"))}
+        saved_fixture_ids: set[str] = set()
 
-        for fixture in fixtures:
-            fixture_date = fixture.get("start_dt")
-            if not fixture_date:
+        if self.tournament_primary_max_per_cycle > 0:
+            saved_fixture_ids = self._sync_by_tournaments(
+                token=token,
+                sport_id=sport_id,
+                fixtures=fixtures,
+                fixtures_by_id=fixtures_by_id,
+                indexed_matches=indexed_matches,
+                used_match_ids=used_match_ids,
+                report=report,
+            )
+
+        fallback_budget = self.fixture_fallback_max_per_cycle
+        fallback_used = 0
+        for fixture in _prioritize_fixtures(
+            fixtures,
+            self.tournament_primary_lookahead_hours,
+        ):
+            fixture_id = _safe_str(fixture.get("fixture_id"))
+            if not fixture_id:
                 report["reasons"]["payload_invalido"] += 1
                 continue
-
-            if not self._is_within_window(fixture_date):
-                report["reasons"]["fora_janela"] += 1
+            if not isinstance(fixture.get("start_dt"), datetime):
+                report["reasons"]["payload_invalido"] += 1
+                continue
+            if fixture_id in saved_fixture_ids:
                 continue
 
-            match_data, swapped = self._match_fixture_to_local(
-                fixture,
-                indexed_matches,
-                used_match_ids,
-            )
-            if not match_data:
-                report["reasons"]["sem_match_local"] += 1
-                continue
+            if fallback_budget > 0 and fallback_used >= fallback_budget:
+                logger.warning(
+                    "[ODDS][oddspapi] Limite de fallback por fixture atingido no ciclo (%s).",
+                    fallback_budget,
+                )
+                break
 
-            fixture_id = fixture["fixture_id"]
             odds_payload, odds_error = self._fetch_fixture_odds(token, sport_id, fixture_id)
+            fallback_used += 1
+            report["fixture_fallback_used"] = fallback_used
             if odds_error:
                 report["reasons"]["api_error"] += 1
-                continue
-            if _payload_has_no_odds(odds_payload):
-                report["reasons"]["sem_odds"] += 1
-                continue
-
-            quotes = _extract_bookmaker_quotes(odds_payload, fixture)
-            if not quotes:
-                if _payload_has_any_price(odds_payload):
-                    report["reasons"]["sem_odds_h2h"] += 1
-                    if payload_invalid_logged < 3:
-                        logger.debug(
-                            "[ODDS][oddspapi] payload sem linha h2h fixture=%s %s",
-                            fixture_id,
-                            _payload_debug_summary(odds_payload),
-                        )
-                        payload_invalid_logged += 1
-                else:
-                    report["reasons"]["sem_odds"] += 1
+                if odds_error == "quota_cycle_reached":
+                    break
                 continue
 
-            best = self._select_best_h2h_lines(quotes)
-            if best["filtered_count"] > 0:
-                report["reasons"]["bookmaker_filtrado"] += best["filtered_count"]
-            if not best["home"] or not best["away"]:
-                report["reasons"]["sem_odds"] += 1
-                continue
+            if self._process_fixture_odds_payload(
+                fixture=fixture,
+                odds_payload=odds_payload,
+                indexed_matches=indexed_matches,
+                used_match_ids=used_match_ids,
+                report=report,
+            ):
+                saved_fixture_ids.add(fixture_id)
 
-            match_id = _safe_int(match_data.get("id"))
-            if match_id <= 0:
-                report["reasons"]["payload_invalido"] += 1
-                continue
-
-            snapshots_saved = self._save_snapshots(
-                match_id=match_id,
-                fixture_id=fixture_id,
-                quotes=best["quotes"],
-                swapped=swapped,
+        if self._cycle_quota_hit:
+            if not report.get("error"):
+                report["error"] = "quota_cycle_reached"
+            logger.warning(
+                "[ODDS][oddspapi] Limite de requests por ciclo atingido (%s). Sync parcial.",
+                self.max_requests_per_cycle,
             )
-            report["snapshots_saved"] += snapshots_saved
-
-            home_best = best["home"]
-            away_best = best["away"]
-            if swapped:
-                team1_odds = away_best["odds"]
-                team2_odds = home_best["odds"]
-                team1_book = away_best["bookmaker"]
-                team2_book = home_best["bookmaker"]
-            else:
-                team1_odds = home_best["odds"]
-                team2_odds = away_best["odds"]
-                team1_book = home_best["bookmaker"]
-                team2_book = away_best["bookmaker"]
-
-            self.db.upsert_match_odds_latest(
-                match_id=match_id,
-                provider="oddspapi",
-                fixture_id=fixture_id,
-                market_key=self.market,
-                odds_team1=team1_odds,
-                odds_team2=team2_odds,
-                bookmaker_team1=team1_book,
-                bookmaker_team2=team2_book,
-                updated_at=to_storage_utc_iso(
-                    datetime.now(timezone.utc),
-                    logger=logger,
-                    context="odds.upsert_latest.updated_at",
-                ),
-            )
-            report["saved"] += 1
-            report["matched"] += 1
-            used_match_ids.add(match_id)
 
         report["skipped"] = max(report["returned"] - report["matched"], 0)
+        report["requests_used"] = self._cycle_requests_used
         self._log_report(report)
         return report
 
@@ -255,6 +242,9 @@ class OddsPapiSync:
             "saved": 0,
             "snapshots_saved": 0,
             "skipped": 0,
+            "requests_used": 0,
+            "tournament_primary_used": 0,
+            "fixture_fallback_used": 0,
             "reasons": {key: 0 for key in ODDS_SKIP_REASON_KEYS},
             "error": "",
         }
@@ -263,7 +253,8 @@ class OddsPapiSync:
         reasons = report.get("reasons", {})
         logger.info(
             "[ODDS][oddspapi] retornadas=%s casadas=%s salvas=%s snapshots=%s descartadas=%s "
-            "(sem_match_local=%s, sem_odds=%s, sem_odds_h2h=%s, fora_janela=%s, bookmaker_filtrado=%s, payload_invalido=%s, api_error=%s)",
+            "(sem_match_local=%s, sem_odds=%s, sem_odds_h2h=%s, fora_janela=%s, bookmaker_filtrado=%s, payload_invalido=%s, api_error=%s) "
+            "req=%s torneios=%s fallback=%s",
             _safe_int(report.get("returned")),
             _safe_int(report.get("matched")),
             _safe_int(report.get("saved")),
@@ -276,6 +267,9 @@ class OddsPapiSync:
             _safe_int(reasons.get("bookmaker_filtrado")),
             _safe_int(reasons.get("payload_invalido")),
             _safe_int(reasons.get("api_error")),
+            _safe_int(report.get("requests_used")),
+            _safe_int(report.get("tournament_primary_used")),
+            _safe_int(report.get("fixture_fallback_used")),
         )
         if report.get("error"):
             logger.warning("[ODDS][oddspapi] erro=%s", report["error"])
@@ -434,6 +428,203 @@ class OddsPapiSync:
 
         return None, last_error
 
+    def _sync_by_tournaments(
+        self,
+        token: str,
+        sport_id: str,
+        fixtures: list[dict],
+        fixtures_by_id: dict[str, dict],
+        indexed_matches: dict[tuple[str, str], list[dict]],
+        used_match_ids: set[int],
+        report: dict,
+    ) -> set[str]:
+        tournament_ids = _collect_priority_tournament_ids(
+            fixtures=fixtures,
+            lookahead_hours=self.tournament_primary_lookahead_hours,
+            limit=self.tournament_primary_max_per_cycle,
+        )
+        if not tournament_ids:
+            return set()
+
+        saved_fixture_ids: set[str] = set()
+        processed_fixture_ids: set[str] = set()
+        used_tournaments = 0
+
+        for tournament_id in tournament_ids:
+            payload, error = self._fetch_tournament_odds(token, sport_id, tournament_id)
+            if error:
+                report["reasons"]["api_error"] += 1
+                if error == "quota_cycle_reached":
+                    break
+                continue
+
+            used_tournaments += 1
+            report["tournament_primary_used"] = used_tournaments
+
+            for item in _extract_tournament_fixture_nodes(payload):
+                fixture = _normalize_fixture_payload(item)
+                if not fixture:
+                    fixture_id = _safe_str(
+                        item.get("fixtureId", item.get("fixture_id", item.get("id", "")))
+                    )
+                    fixture = fixtures_by_id.get(fixture_id)
+                if not fixture:
+                    report["reasons"]["payload_invalido"] += 1
+                    continue
+
+                fixture_id = _safe_str(fixture.get("fixture_id"))
+                if not fixture_id or fixture_id in processed_fixture_ids:
+                    continue
+                processed_fixture_ids.add(fixture_id)
+
+                if self._process_fixture_odds_payload(
+                    fixture=fixture,
+                    odds_payload=item,
+                    indexed_matches=indexed_matches,
+                    used_match_ids=used_match_ids,
+                    report=report,
+                ):
+                    saved_fixture_ids.add(fixture_id)
+
+        return saved_fixture_ids
+
+    def _process_fixture_odds_payload(
+        self,
+        fixture: dict,
+        odds_payload: dict | list | None,
+        indexed_matches: dict[tuple[str, str], list[dict]],
+        used_match_ids: set[int],
+        report: dict,
+    ) -> bool:
+        fixture_date = fixture.get("start_dt")
+        if not fixture_date:
+            report["reasons"]["payload_invalido"] += 1
+            return False
+
+        if not self._is_within_window(fixture_date):
+            report["reasons"]["fora_janela"] += 1
+            return False
+
+        match_data, swapped = self._match_fixture_to_local(
+            fixture,
+            indexed_matches,
+            used_match_ids,
+        )
+        if not match_data:
+            report["reasons"]["sem_match_local"] += 1
+            return False
+
+        if _payload_has_no_odds(odds_payload):
+            report["reasons"]["sem_odds"] += 1
+            return False
+
+        quotes = _extract_bookmaker_quotes(odds_payload, fixture)
+        if not quotes:
+            if _payload_has_any_price(odds_payload):
+                report["reasons"]["sem_odds_h2h"] += 1
+                if self._payload_non_h2h_debug_logged < 3:
+                    logger.debug(
+                        "[ODDS][oddspapi] payload sem linha h2h fixture=%s %s",
+                        _safe_str(fixture.get("fixture_id")),
+                        _payload_debug_summary(odds_payload),
+                    )
+                    self._payload_non_h2h_debug_logged += 1
+            else:
+                report["reasons"]["sem_odds"] += 1
+            return False
+
+        best = self._select_best_h2h_lines(quotes)
+        if best["filtered_count"] > 0:
+            report["reasons"]["bookmaker_filtrado"] += best["filtered_count"]
+        if not best["home"] or not best["away"]:
+            report["reasons"]["sem_odds"] += 1
+            return False
+
+        match_id = _safe_int(match_data.get("id"))
+        if match_id <= 0:
+            report["reasons"]["payload_invalido"] += 1
+            return False
+
+        fixture_id = _safe_str(fixture.get("fixture_id"))
+        snapshots_saved = self._save_snapshots(
+            match_id=match_id,
+            fixture_id=fixture_id,
+            quotes=best["quotes"],
+            swapped=swapped,
+        )
+        report["snapshots_saved"] += snapshots_saved
+
+        home_best = best["home"]
+        away_best = best["away"]
+        if swapped:
+            team1_odds = away_best["odds"]
+            team2_odds = home_best["odds"]
+            team1_book = away_best["bookmaker"]
+            team2_book = home_best["bookmaker"]
+        else:
+            team1_odds = home_best["odds"]
+            team2_odds = away_best["odds"]
+            team1_book = home_best["bookmaker"]
+            team2_book = away_best["bookmaker"]
+
+        self.db.upsert_match_odds_latest(
+            match_id=match_id,
+            provider="oddspapi",
+            fixture_id=fixture_id,
+            market_key=self.market,
+            odds_team1=team1_odds,
+            odds_team2=team2_odds,
+            bookmaker_team1=team1_book,
+            bookmaker_team2=team2_book,
+            updated_at=to_storage_utc_iso(
+                datetime.now(timezone.utc),
+                logger=logger,
+                context="odds.upsert_latest.updated_at",
+            ),
+        )
+        report["saved"] += 1
+        report["matched"] += 1
+        used_match_ids.add(match_id)
+        return True
+
+    def _fetch_tournament_odds(
+        self,
+        token: str,
+        sport_id: str,
+        tournament_id: str,
+    ) -> tuple[dict | list | None, str]:
+        now = datetime.now(timezone.utc) - timedelta(hours=1)
+        until = now + timedelta(hours=self.tournament_primary_lookahead_hours)
+        base_params = {
+            "sport": sport_id,
+            "sportId": sport_id,
+            "tournament": tournament_id,
+            "tournamentId": tournament_id,
+            "market": self.market,
+            "oddsFormat": "decimal",
+            "verbosity": self.odds_verbosity,
+            "bookmakers": ",".join(sorted(self.bookmaker_whitelist)),
+            "startDate": now.isoformat(),
+            "endDate": until.isoformat(),
+            "from": now.isoformat(),
+            "to": until.isoformat(),
+            "hasOdds": "true",
+        }
+        routes = (
+            "/odds-by-tournaments",
+            "/odds/by-tournaments",
+            "/tournaments/odds",
+        )
+        last_error = ""
+        for path in routes:
+            payload, error = self._request_json(path, token, base_params)
+            if not error:
+                return payload, ""
+            last_error = error
+            if error in {"quota_cycle_reached", "http_401", "http_403", "http_429"}:
+                break
+        return None, last_error
+
     def _request_json(self, path: str, token: str, params: dict) -> tuple[dict | list | None, str]:
         headers = {
             "accept": "application/json",
@@ -451,6 +642,9 @@ class OddsPapiSync:
 
             max_attempts = self.retry_count + 1
             for attempt in range(max_attempts):
+                if not self._consume_cycle_request():
+                    self._cycle_quota_hit = True
+                    return None, "quota_cycle_reached"
                 try:
                     resp = requests.get(url, headers=headers, params=query, timeout=self.timeout_sec)
                 except requests.RequestException as exc:
@@ -480,6 +674,14 @@ class OddsPapiSync:
                     return None, "payload_invalido"
 
         return None, last_error or "request_failed"
+
+    def _consume_cycle_request(self) -> bool:
+        if self.max_requests_per_cycle <= 0:
+            return True
+        if self._cycle_requests_used >= self.max_requests_per_cycle:
+            return False
+        self._cycle_requests_used += 1
+        return True
 
     def _match_fixture_to_local(
         self,
@@ -701,6 +903,110 @@ def _flatten_indexed_matches(indexed: dict[tuple[str, str], list[dict]]) -> list
             if match_id > 0:
                 seen_ids.add(match_id)
             out.append(match)
+    return out
+
+
+def _prioritize_fixtures(fixtures: list[dict], lookahead_hours: int) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    priority_deadline = now + timedelta(hours=max(1, lookahead_hours))
+
+    def _sort_key(item: dict):
+        dt = _ensure_utc(item.get("start_dt")) if isinstance(item.get("start_dt"), datetime) else None
+        if dt is None:
+            return (2, datetime.max.replace(tzinfo=timezone.utc))
+        priority_bucket = 0 if dt <= priority_deadline else 1
+        return (priority_bucket, dt)
+
+    return sorted(fixtures, key=_sort_key)
+
+
+def _collect_priority_tournament_ids(
+    fixtures: list[dict],
+    lookahead_hours: int,
+    limit: int,
+) -> list[str]:
+    if limit <= 0:
+        return []
+
+    now = datetime.now(timezone.utc)
+    priority_deadline = now + timedelta(hours=max(1, lookahead_hours))
+    earliest_by_tournament: dict[str, datetime] = {}
+
+    for fixture in fixtures:
+        tournament_id = _safe_str(fixture.get("tournament_id"))
+        fixture_dt = fixture.get("start_dt")
+        if not tournament_id or not isinstance(fixture_dt, datetime):
+            continue
+        fixture_dt = _ensure_utc(fixture_dt)
+        prev = earliest_by_tournament.get(tournament_id)
+        if prev is None or fixture_dt < prev:
+            earliest_by_tournament[tournament_id] = fixture_dt
+
+    ordered = sorted(
+        earliest_by_tournament.items(),
+        key=lambda item: (
+            0 if item[1] <= priority_deadline else 1,
+            item[1],
+        ),
+    )
+    return [tid for tid, _ in ordered[:limit]]
+
+
+def _extract_tournament_fixture_nodes(payload) -> list[dict]:
+    out: list[dict] = []
+    seen_fixture_ids: set[str] = set()
+    visited_nodes: set[int] = set()
+
+    def _walk(node, depth: int) -> None:
+        if depth > 7 or node is None:
+            return
+
+        node_id = id(node)
+        if node_id in visited_nodes:
+            return
+        visited_nodes.add(node_id)
+
+        if isinstance(node, list):
+            for item in node:
+                _walk(item, depth + 1)
+            return
+
+        if not isinstance(node, dict):
+            return
+
+        fixture_id = _safe_str(
+            node.get("fixtureId", node.get("fixture_id", node.get("id", "")))
+        )
+        if fixture_id and (_payload_has_any_price(node) or isinstance(node.get("bookmakerOdds"), (dict, list))):
+            if fixture_id not in seen_fixture_ids:
+                seen_fixture_ids.add(fixture_id)
+                out.append(node)
+
+        candidate_keys = (
+            "fixtures",
+            "matches",
+            "events",
+            "items",
+            "results",
+            "data",
+            "markets",
+            "bookmakerOdds",
+            "odds",
+            "tournaments",
+        )
+        walked_child = False
+        for key in candidate_keys:
+            child = node.get(key)
+            if isinstance(child, (dict, list)):
+                walked_child = True
+                _walk(child, depth + 1)
+
+        if not walked_child:
+            for child in node.values():
+                if isinstance(child, (dict, list)):
+                    _walk(child, depth + 1)
+
+    _walk(payload, 0)
     return out
 
 
@@ -1316,6 +1622,12 @@ def _normalize_fixture_payload(item: dict) -> dict | None:
     away_name = away_name or _safe_str(item.get("participant2Name", item.get("team2Name", "")))
     home_id = _safe_str(item.get("participant1Id", item.get("team1Id", item.get("homeId", ""))))
     away_id = _safe_str(item.get("participant2Id", item.get("team2Id", item.get("awayId", ""))))
+    tournament_id = _safe_str(
+        item.get(
+            "tournamentId",
+            item.get("tournament_id", item.get("competitionId", item.get("leagueId", ""))),
+        )
+    )
 
     if not home_name or not away_name:
         participants = item.get("participants", item.get("teams", item.get("opponents", [])))
@@ -1361,6 +1673,7 @@ def _normalize_fixture_payload(item: dict) -> dict | None:
         "away_name": away_name,
         "home_id": home_id,
         "away_id": away_id,
+        "tournament_id": tournament_id,
         "start_dt": _ensure_utc(start_dt),
         "event_name": event_name,
     }
