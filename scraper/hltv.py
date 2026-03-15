@@ -738,11 +738,15 @@ class HLTVScraper:
         if len(teams) < 2:
             return None
 
+        tournament = match.get("tournament")
+        serie = match.get("serie")
+        league = match.get("league")
         event_name = _safe_str(
-            match.get("tournament", {}).get("name")
-            or match.get("serie", {}).get("name")
-            or match.get("league", {}).get("name")
+            (tournament.get("name") if isinstance(tournament, dict) else None)
+            or (serie.get("name") if isinstance(serie, dict) else None)
+            or (league.get("name") if isinstance(league, dict) else None)
             or match.get("videogame_title")
+            or match.get("name")
         )
         raw_date = (
             match.get("begin_at")
@@ -1540,7 +1544,11 @@ def _extract_pandascore_teams(match_data: dict) -> list[dict]:
             opponent = item.get("opponent", item)
             if not isinstance(opponent, dict):
                 continue
-            name = _safe_str(opponent.get("name", opponent.get("acronym", "")))
+            name = _safe_str(
+                opponent.get("name")
+                or opponent.get("acronym")
+                or opponent.get("slug", "").replace("-", " ")
+            )
             if not name:
                 continue
             teams.append({"id": _safe_int(opponent.get("id")), "name": name})
@@ -1548,17 +1556,63 @@ def _extract_pandascore_teams(match_data: dict) -> list[dict]:
     if len(teams) >= 2:
         return teams[:2]
 
-    fallback = match_data.get("teams")
-    if isinstance(fallback, list):
-        for item in fallback:
-            if not isinstance(item, dict):
-                continue
-            name = _safe_str(item.get("name", item.get("acronym", "")))
-            if not name:
-                continue
-            teams.append({"id": _safe_int(item.get("id")), "name": name})
-            if len(teams) >= 2:
-                break
+    # Fallback: campo "teams"
+    for field in ("teams", "participants", "competitors"):
+        fallback = match_data.get(field)
+        if isinstance(fallback, list):
+            for item in fallback:
+                if not isinstance(item, dict):
+                    continue
+                inner = item.get("team", item.get("opponent", item.get("competitor", item)))
+                if isinstance(inner, dict):
+                    name = _safe_str(
+                        inner.get("name")
+                        or inner.get("acronym")
+                        or inner.get("slug", "").replace("-", " ")
+                    )
+                    tid = _safe_int(inner.get("id", item.get("id")))
+                else:
+                    name = _safe_str(
+                        item.get("name")
+                        or item.get("acronym")
+                        or item.get("slug", "").replace("-", " ")
+                    )
+                    tid = _safe_int(item.get("id"))
+                if not name:
+                    continue
+                teams.append({"id": tid, "name": name})
+                if len(teams) >= 2:
+                    break
+        if len(teams) >= 2:
+            break
+
+    # Fallback: campos de nome direto no root
+    if len(teams) < 2:
+        for t1_key, t2_key, id1_key, id2_key in (
+            ("team1", "team2", "team1_id", "team2_id"),
+            ("home", "away", "home_id", "away_id"),
+            ("home_team", "away_team", "home_team_id", "away_team_id"),
+        ):
+            t1_val = match_data.get(t1_key)
+            t2_val = match_data.get(t2_key)
+            if isinstance(t1_val, dict) and isinstance(t2_val, dict):
+                n1 = _safe_str(t1_val.get("name") or t1_val.get("acronym", ""))
+                n2 = _safe_str(t2_val.get("name") or t2_val.get("acronym", ""))
+                if n1 and n2:
+                    teams = [
+                        {"id": _safe_int(t1_val.get("id")), "name": n1},
+                        {"id": _safe_int(t2_val.get("id")), "name": n2},
+                    ]
+                    break
+            elif isinstance(t1_val, str) and isinstance(t2_val, str):
+                n1 = _safe_str(t1_val)
+                n2 = _safe_str(t2_val)
+                if n1 and n2:
+                    teams = [
+                        {"id": _safe_int(match_data.get(id1_key)), "name": n1},
+                        {"id": _safe_int(match_data.get(id2_key)), "name": n2},
+                    ]
+                    break
 
     return teams[:2]
 

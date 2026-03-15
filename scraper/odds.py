@@ -705,6 +705,20 @@ class OddsPapiSync:
         if best_item:
             return best_item, best_swapped
 
+        # Containment fallback: "g2" matches "g2esports", etc.
+        contain_candidates = _find_containment_candidates(
+            home_norm, away_norm, indexed_matches,
+        )
+        if contain_candidates:
+            best_item, best_swapped, _ = self._pick_best_candidate(
+                fixture=fixture,
+                candidates=contain_candidates,
+                used_match_ids=used_match_ids,
+                allow_fuzzy=True,
+            )
+            if best_item:
+                return best_item, best_swapped
+
         # Fallback moderado: similaridade de nomes + evento + proximidade horaria.
         fallback_candidates = _flatten_indexed_matches(indexed_matches)
         best_item, best_swapped, best_score = self._pick_best_candidate(
@@ -713,7 +727,7 @@ class OddsPapiSync:
             used_match_ids=used_match_ids,
             allow_fuzzy=True,
         )
-        if best_item and best_score >= 2.10:
+        if best_item and best_score >= 1.75:
             return best_item, best_swapped
         return None, False
 
@@ -755,7 +769,7 @@ class OddsPapiSync:
                 aligned_team_score = (_team_similarity(home_raw, local_t1_raw) + _team_similarity(away_raw, local_t2_raw)) / 2.0
                 swapped_team_score = (_team_similarity(home_raw, local_t2_raw) + _team_similarity(away_raw, local_t1_raw)) / 2.0
                 best_team_score = max(aligned_team_score, swapped_team_score)
-                if best_team_score < 0.58:
+                if best_team_score < 0.48:
                     continue
                 swapped = swapped_team_score > aligned_team_score
                 score += best_team_score * 2.0
@@ -885,6 +899,26 @@ def _index_local_matches(matches: list[dict]) -> dict[tuple[str, str], list[dict
             continue
         key = tuple(sorted((t1, t2)))
         out.setdefault(key, []).append(match)
+    return out
+
+
+def _find_containment_candidates(
+    home_norm: str,
+    away_norm: str,
+    indexed_matches: dict[tuple[str, str], list[dict]],
+) -> list[dict]:
+    """Find candidates where normalized names contain/are contained by the fixture names."""
+    out: list[dict] = []
+    seen_ids: set[int] = set()
+    for (t1, t2), matches in indexed_matches.items():
+        home_ok = (home_norm in t1 or t1 in home_norm or home_norm in t2 or t2 in home_norm)
+        away_ok = (away_norm in t1 or t1 in away_norm or away_norm in t2 or t2 in away_norm)
+        if home_ok and away_ok:
+            for m in matches:
+                mid = _safe_int(m.get("id"))
+                if mid > 0 and mid not in seen_ids:
+                    seen_ids.add(mid)
+                    out.append(m)
     return out
 
 
@@ -1795,8 +1829,9 @@ def _team_similarity(a: str, b: str) -> float:
     if na == nb:
         return 1.0
 
-    if (na in nb or nb in na) and min(len(na), len(nb)) >= 4:
-        contains_score = 0.88
+    if (na in nb or nb in na) and min(len(na), len(nb)) >= 2:
+        ratio = min(len(na), len(nb)) / max(len(na), len(nb))
+        contains_score = max(0.82, ratio) if ratio >= 0.3 else 0.82
     else:
         contains_score = 0.0
 

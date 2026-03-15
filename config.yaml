@@ -56,7 +56,7 @@ odds:
   days_ahead: 7
   refresh_minutes: 30
   match_window_hours: 8
-  max_requests_per_cycle: 80
+  max_requests_per_cycle: 150
   tournament_primary_lookahead_hours: 72
   tournament_primary_max_per_cycle: 8
   fixture_fallback_max_per_cycle: 24
@@ -104,18 +104,18 @@ model:
   min_train_samples: 120
   min_class_samples: 30
   confidence_auto_tune: true
-  confidence_grid: [60, 65, 70, 75, 80]
-  coverage_min_holdout: 0.15
+  confidence_grid: [50, 55, 60, 65, 70]
+  coverage_min_holdout: 0.25
   prediction_temperature: 0.95
   low_data_rank_blend: 0.35
   rank_prior_scale: 12.0
   # Minimo de value (%) pra disparar alerta
   min_value_pct: 5.0
   # Confianca minima do modelo (%) pra considerar
-  min_confidence: 60.0
+  min_confidence: 55.0
   # Thresholds mais rigidos para partidas com pelo menos um time sintetico
-  synthetic_live_min_confidence: 66.0
-  synthetic_live_min_value_pct: 6.0
+  synthetic_live_min_confidence: 60.0
+  synthetic_live_min_value_pct: 5.0
   # Quantidade de melhores partidas para ranking por ciclo
   top_bets_count: 4
   # Ignora partidas que comecam em ate X minutos (ou que ja iniciaram)
