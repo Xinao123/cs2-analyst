@@ -408,8 +408,9 @@ class OddsPapiSync:
             "market": self.market,
             "oddsFormat": "decimal",
             "verbosity": self.odds_verbosity,
-            "bookmakers": ",".join(sorted(self.bookmaker_whitelist)),
         }
+        if self.bookmaker_whitelist:
+            base_params["bookmakers"] = ",".join(sorted(self.bookmaker_whitelist))
 
         routes = [
             ("/odds", base_params),
@@ -603,7 +604,6 @@ class OddsPapiSync:
             "market": self.market,
             "oddsFormat": "decimal",
             "verbosity": self.odds_verbosity,
-            "bookmakers": ",".join(sorted(self.bookmaker_whitelist)),
             "startDate": now.isoformat(),
             "endDate": until.isoformat(),
             "from": now.isoformat(),
