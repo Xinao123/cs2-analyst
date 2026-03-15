@@ -19,6 +19,7 @@ Uso:
     python main.py --stats           # Mostra stats do banco
 """
 
+import re
 import sys
 import time
 import signal
@@ -136,6 +137,10 @@ async def analyze_upcoming(
     min_recent_matches = max(0, int(model_cfg.get("live_min_recent_matches", 2)))
     form_window_days = max(1, int(model_cfg.get("form_window_days", 365)))
     max_pick_odds_age_minutes = max(1, int(odds_cfg.get("max_pick_odds_age_minutes", 120)))
+    _wl_raw = odds_cfg.get("bookmaker_whitelist", [])
+    if isinstance(_wl_raw, str):
+        _wl_raw = [p.strip() for p in _wl_raw.split(",")]
+    odds_whitelist = {re.sub(r"[^a-z0-9]", "", v.lower()) for v in _wl_raw if v} if _wl_raw else set()
 
     now_dt = datetime.now(timezone.utc)
     min_start_cutoff = now_dt + timedelta(minutes=min_minutes_before_match)
@@ -171,6 +176,11 @@ async def analyze_upcoming(
             _safe_float(match.get("odds_team1")) > 1.0
             and _safe_float(match.get("odds_team2")) > 1.0
         )
+        if has_valid_odds and odds_whitelist:
+            b1 = re.sub(r"[^a-z0-9]", "", str(match.get("bookmaker_team1", "")).lower())
+            b2 = re.sub(r"[^a-z0-9]", "", str(match.get("bookmaker_team2", "")).lower())
+            if b1 not in odds_whitelist or b2 not in odds_whitelist:
+                has_valid_odds = False
         team1_id = int(match.get("team1_id", 0) or 0)
         team2_id = int(match.get("team2_id", 0) or 0)
         is_synthetic_match = _is_synthetic_match(match)

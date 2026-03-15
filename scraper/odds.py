@@ -116,6 +116,25 @@ class OddsPapiSync:
     def refresh_seconds(self) -> int:
         return self.refresh_minutes * 60
 
+    def _purge_non_whitelisted_odds(self):
+        """Remove odds from match_odds_latest where bookmaker is not in whitelist."""
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                "SELECT match_id, bookmaker_team1, bookmaker_team2 FROM match_odds_latest"
+            ).fetchall()
+            purged = 0
+            for row in rows:
+                b1 = _normalize_bookmaker_name(row["bookmaker_team1"])
+                b2 = _normalize_bookmaker_name(row["bookmaker_team2"])
+                if b1 not in self.bookmaker_whitelist or b2 not in self.bookmaker_whitelist:
+                    conn.execute(
+                        "DELETE FROM match_odds_latest WHERE match_id=?",
+                        (row["match_id"],),
+                    )
+                    purged += 1
+            if purged:
+                logger.info("[ODDS] Purged %d stale odds from non-whitelisted bookmakers.", purged)
+
     def sync_upcoming_odds(self) -> dict:
         report = self._new_report()
         self._cycle_requests_used = 0
@@ -138,6 +157,10 @@ class OddsPapiSync:
                 self.token_env,
             )
             return report
+
+        # Purge stale odds from non-whitelisted bookmakers
+        if self.bookmaker_whitelist:
+            self._purge_non_whitelisted_odds()
 
         local_matches = self.db.get_upcoming_matches()
         if not local_matches:
@@ -610,6 +633,8 @@ class OddsPapiSync:
             "to": until.isoformat(),
             "hasOdds": "true",
         }
+        if self.bookmaker_whitelist:
+            base_params["bookmakers"] = ",".join(sorted(self.bookmaker_whitelist))
         routes = (
             "/odds-by-tournaments",
             "/odds/by-tournaments",
